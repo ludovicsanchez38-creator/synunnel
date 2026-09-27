@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block title %}Inscription{% endblock %}
+{% block content %}
+<section class="auth-layout">
+  <div class="intro"><span class="eyebrow">BIENVENUE</span><h1>Un domaine. Vos machines. Votre accès.</h1><p>Créez un compte pour préparer votre espace. Ludo doit le valider avant que vous puissiez ajouter un domaine.</p><div class="rule"></div><p class="muted">Synunnel n'envoie pas de mail automatique.</p></div>
+  <div class="card auth-card"><h2>Demander un accès</h2>
+    <form method="post" action="{{ url_for('register') }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <label>Adresse mail<input type="email" name="email" autocomplete="email" required></label>
+      <label>Mot de passe <span class="hint">12 caractères minimum</span><input type="password" name="password" minlength="12" autocomplete="new-password" required></label>
+      <button class="button" type="submit">Créer mon compte</button>
+    </form>
+    <p class="small">Déjà inscrit ? <a href="{{ url_for('login') }}">Se connecter</a></p>
+  </div>
+</section>
+{% endblock %}

@@ -1,0 +1,29 @@
+# Synunnel managed. Le script d'installation préserve ce fichier lors des relances.
+{
+    email ludo@synoptia.fr
+    on_demand_tls {
+        ask http://127.0.0.1:8000/internal/caddy/ask
+    }
+}
+
+https:// {
+    tls {
+        on_demand
+    }
+    @synunnel_dashboard host synunnel.synoptia.fr
+    handle @synunnel_dashboard {
+        @synunnel_dashboard_internal path /internal/*
+        handle @synunnel_dashboard_internal {
+            respond 404
+        }
+        handle {
+            reverse_proxy 127.0.0.1:8000 {
+                header_up X-Real-IP {remote_host}
+            }
+        }
+    }
+    import /etc/caddy/synunnel-routes.caddy
+    handle {
+        respond "Adresse inconnue" 403
+    }
+}

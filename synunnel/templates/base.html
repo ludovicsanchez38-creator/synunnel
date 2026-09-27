@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Synunnel{% endblock %} · Synoptïa</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='site.css') }}">
+</head>
+<body>
+  <div class="shell">
+    <header class="topbar">
+      <a class="brand" href="{{ url_for('index') }}"><span class="mark">S</span><span>Synunnel<small>par Synoptïa</small></span></a>
+      <nav aria-label="Navigation principale">
+        {% if current_user %}
+          <a href="{{ url_for('dashboard') }}">Tableau de bord</a>
+          <span class="identity">{{ current_user.email }}</span>
+          <form class="inline" action="{{ url_for('logout') }}" method="post"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="text-button" type="submit">Déconnexion</button></form>
+        {% else %}
+          <a href="{{ url_for('login') }}">Connexion</a>
+          <a href="{{ url_for('register') }}">Inscription</a>
+        {% endif %}
+      </nav>
+    </header>
+    <main>
+      {% for category, message in get_flashed_messages(with_categories=true) %}<div class="notice {{ category }}" role="status">{{ message }}</div>{% endfor %}
+      {% block content %}{% endblock %}
+    </main>
+    <footer>Synunnel, un projet Synoptïa. Humain d'abord - IA en soutien.</footer>
+  </div>
+</body>
+</html>

@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block title %}Connexion{% endblock %}
+{% block content %}
+<section class="auth-layout">
+  <div class="intro"><span class="eyebrow">ACCÈS PRIVÉ</span><h1>Vos services, à votre adresse.</h1><p>Reliez les machines de votre choix à votre domaine, sans ouvrir de port sur votre box.</p><div class="rule"></div><p class="muted">Les nouveaux comptes sont vérifiés par l'administrateur avant tout accès.</p></div>
+  <div class="card auth-card"><h2>Connexion</h2><p class="muted">Retrouvez vos domaines, machines et adresses.</p>
+    <form method="post" action="{{ url_for('login') }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}"><input type="hidden" name="next" value="{{ next_url }}">
+      <label>Adresse mail<input type="email" name="email" autocomplete="email" required></label>
+      <label>Mot de passe<input type="password" name="password" autocomplete="current-password" required></label>
+      <button class="button" type="submit">Se connecter</button>
+    </form>
+    <p class="small">Pas encore de compte ? <a href="{{ url_for('register') }}">Demander un accès</a></p>
+  </div>
+</section>
+{% endblock %}

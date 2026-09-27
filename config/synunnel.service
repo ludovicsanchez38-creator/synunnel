@@ -1,0 +1,24 @@
+[Unit]
+Description=Synunnel web et API
+After=network-online.target pdns.service wg-quick@wg0.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=synunnel
+Group=synunnel
+WorkingDirectory=/home/ubuntu/synunnel
+EnvironmentFile=/etc/synunnel/synunnel.env
+ExecStart=/home/ubuntu/synunnel/.venv/bin/gunicorn --workers 2 --bind 127.0.0.1:8000 --access-logfile - --error-logfile - synunnel:create_app()
+Restart=on-failure
+RestartSec=3
+UMask=0027
+PrivateTmp=true
+ProtectHome=read-only
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+
+[Install]
+WantedBy=multi-user.target
