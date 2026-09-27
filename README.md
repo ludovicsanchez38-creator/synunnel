@@ -8,7 +8,7 @@ Le dépôt est **local au VPS Synunnel** (`/home/ubuntu/synunnel`). Aucun dépô
 
 Le tableau de bord est configuré pour `https://synunnel.fr`. Les serveurs autoritaires sont `ns1.synunnel.fr` et `ns2.synunnel.fr`. `synunnel.com` et `www.synunnel.com` répondent par une redirection HTTPS 308 vers `synunnel.fr`, avec le chemin conservé. Le 27 septembre 2026, les dix enregistrements indiqués ci-dessous ont été observés dans le DNS public ; le tableau de bord et les deux redirections ont répondu avec un certificat public valide. Le comportement avait aussi été vérifié avec la CA locale temporaire de Caddy et `curl --resolve`, puis la configuration normale restaurée.
 
-Les comptes réels et les zones sont encore vides. La landing TOOGGY est préparée sur **le VPS TOOGGY**, dans `/home/ubuntu/tooggy-landing` de cette autre machine, sans service démarré. Son rattachement dépend de la création et de l'approbation du compte personnel de Ludo. Le VPS Synunnel n'héberge aucun fichier, service ou espace réseau TOOGGY.
+Le compte personnel de Ludo est approuvé. La zone locale `tooggy.com`, la machine `tooggy-vps` et ses deux adresses protégées en accès partagé sont créées ; la liste des associés est encore vide. La landing est hébergée sur **le VPS TOOGGY**, dans `/home/ubuntu/tooggy-landing` de cette autre machine. Voir son README pour l'état du tunnel et du service. Le VPS Synunnel n'héberge aucune copie de la landing ni espace réseau provisoire TOOGGY.
 
 ## Enregistrements OVH constatés
 
