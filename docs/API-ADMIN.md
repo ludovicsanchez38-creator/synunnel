@@ -21,7 +21,7 @@ read -rsp 'Jeton admin Synunnel : ' SYNUNNEL_ADMIN_TOKEN
 printf '\n'
 curl --fail --silent --show-error \
   -H "Authorization: Bearer ${SYNUNNEL_ADMIN_TOKEN}" \
-  https://synunnel.synoptia.fr/admin/api/pending
+  https://synunnel.fr/admin/api/pending
 unset SYNUNNEL_ADMIN_TOKEN
 ```
 

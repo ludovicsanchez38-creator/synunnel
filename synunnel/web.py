@@ -115,6 +115,24 @@ def _sync_runtime(app: Flask) -> None:
         subprocess.run(shlex.split(command), check=True, capture_output=True, timeout=20)
 
 
+def _authorized_protected_user(hostname: str, user_id: int) -> bool:
+    return get_db().execute(
+        "SELECT 1 FROM addresses a JOIN domains d ON d.id=a.domain_id "
+        "JOIN users u ON u.id=? AND u.status='approved' "
+        "WHERE a.hostname=? AND a.protected=1 AND "
+        "(d.user_id=u.id OR (a.shared=1 AND EXISTS ("
+        "SELECT 1 FROM address_grants g WHERE g.address_id=a.id AND g.email=u.email)))",
+        (user_id, hostname),
+    ).fetchone() is not None
+
+
+def _parse_grants(raw: str) -> list[str]:
+    emails = sorted({part.lower() for part in re.split(r"[,;\s]+", raw.strip()) if part})
+    if len(emails) > 100 or any(len(email) > 254 or not EMAIL_RE.fullmatch(email) for email in emails):
+        raise ValueError("Liste invalide : au maximum 100 adresses mail valides.")
+    return emails
+
+
 def _validate_next(value: str, user_id: int) -> tuple[str, str] | None:
     try:
         parsed = urlsplit(value)
@@ -123,12 +141,7 @@ def _validate_next(value: str, user_id: int) -> tuple[str, str] | None:
         hostname = parsed.hostname.lower()
         if parsed.fragment:
             return None
-        row = get_db().execute(
-            "SELECT 1 FROM addresses a JOIN domains d ON d.id=a.domain_id "
-            "WHERE a.hostname=? AND a.protected=1 AND d.user_id=?",
-            (hostname, user_id),
-        ).fetchone()
-        if row is None:
+        if not _authorized_protected_user(hostname, user_id):
             return None
         path = parsed.path or "/"
         if not path.startswith("/") or path.startswith("//"):
@@ -167,9 +180,10 @@ def create_app(config_override: dict | None = None) -> Flask:
         PUBLIC_IPV6=os.getenv("PUBLIC_IPV6", "2001:41d0:305:2100::f36e"),
         WG_ENDPOINT=os.getenv("WG_ENDPOINT", "51.254.137.231:51820"),
         WG_SERVER_PUBLIC_KEY=os.getenv("WG_SERVER_PUBLIC_KEY", ""),
-        DASHBOARD_HOST=os.getenv("DASHBOARD_HOST", "synunnel.synoptia.fr"),
-        NS1_HOST=os.getenv("NS1_HOST", "ns1.synunnel.synoptia.fr"),
-        NS2_HOST=os.getenv("NS2_HOST", "ns2.synunnel.synoptia.fr"),
+        DASHBOARD_HOST=os.getenv("DASHBOARD_HOST", "synunnel.fr"),
+        NS1_HOST=os.getenv("NS1_HOST", "ns1.synunnel.fr"),
+        NS2_HOST=os.getenv("NS2_HOST", "ns2.synunnel.fr"),
+        REDIRECT_HOSTS=os.getenv("REDIRECT_HOSTS", "synunnel.com,www.synunnel.com"),
         SYNC_COMMAND=os.getenv("SYNC_COMMAND", "/usr/bin/sudo -n /usr/local/sbin/synunnel-sync"),
         PDNS_ENABLED=True,
         SESSION_COOKIE_NAME="__Host-synunnel",
@@ -301,7 +315,9 @@ def create_app(config_override: dict | None = None) -> Flask:
         domains = db.execute("SELECT * FROM domains WHERE user_id=? ORDER BY name", (g.user["id"],)).fetchall()
         machines = db.execute("SELECT * FROM machines WHERE user_id=? ORDER BY name", (g.user["id"],)).fetchall()
         addresses = db.execute(
-            "SELECT a.*, d.name AS domain_name, m.name AS machine_name FROM addresses a "
+            "SELECT a.*, d.name AS domain_name, m.name AS machine_name, "
+            "(SELECT COUNT(*) FROM address_grants g WHERE g.address_id=a.id) AS grant_count "
+            "FROM addresses a "
             "JOIN domains d ON d.id=a.domain_id JOIN machines m ON m.id=a.machine_id "
             "WHERE d.user_id=? ORDER BY a.hostname", (g.user["id"],),
         ).fetchall()
@@ -473,18 +489,17 @@ def create_app(config_override: dict | None = None) -> Flask:
             domain = _owned_domain(domain_id)
             _owned_machine(machine_id)
             name = relative_name(request.form.get("name", ""), host_only=True)
-            if name == "@":
-                raise ValueError("L'adresse racine n'est pas encore prise en charge.")
             hostname = fqdn(name, domain["name"]).rstrip(".")
             port = int(request.form.get("port", ""))
             if not 1 <= port <= 65535:
                 raise ValueError("Port invalide.")
             db = get_db()
+            conflict_types = ("CNAME",) if name == "@" else ("A", "AAAA", "CNAME")
             if db.execute(
-                "SELECT 1 FROM records WHERE domain_id=? AND name=? AND type IN ('A','AAAA','CNAME')",
-                (domain_id, name),
+                f"SELECT 1 FROM records WHERE domain_id=? AND name=? AND type IN ({','.join('?' for _ in conflict_types)})",
+                (domain_id, name, *conflict_types),
             ).fetchone():
-                raise ValueError("Un enregistrement A, AAAA ou CNAME existe déjà pour ce nom.")
+                raise ValueError("Un enregistrement DNS incompatible existe déjà pour ce nom.")
             with db:
                 cursor = db.execute(
                     "INSERT INTO addresses(domain_id,machine_id,hostname,port,protected,created_at) "
@@ -505,6 +520,43 @@ def create_app(config_override: dict | None = None) -> Flask:
             return redirect(url_for("dashboard"))
         flash(f"Adresse {hostname} créée.", "success")
         return redirect(url_for("dashboard"))
+
+    @app.route("/addresses/<int:address_id>/access", methods=["GET", "POST"])
+    @_login_required
+    def address_access(address_id: int):
+        db = get_db()
+        address = db.execute(
+            "SELECT a.* FROM addresses a JOIN domains d ON d.id=a.domain_id "
+            "WHERE a.id=? AND d.user_id=?", (address_id, g.user["id"]),
+        ).fetchone()
+        if address is None or not address["protected"]:
+            abort(404)
+        if request.method == "POST":
+            try:
+                emails = _parse_grants(request.form.get("emails", ""))
+                shared = bool(request.form.get("shared"))
+                if shared and not emails:
+                    raise ValueError("Ajoute au moins une adresse mail pour activer l'accès partagé.")
+                with db:
+                    db.execute("UPDATE addresses SET shared=? WHERE id=?", (int(shared), address_id))
+                    db.execute("DELETE FROM address_grants WHERE address_id=?", (address_id,))
+                    if shared:
+                        db.executemany(
+                            "INSERT INTO address_grants(address_id,email) VALUES(?,?)",
+                            [(address_id, email) for email in emails],
+                        )
+                    # Les cookies et codes précédents sont révoqués à chaque changement.
+                    db.execute("DELETE FROM host_sessions WHERE hostname=?", (address["hostname"],))
+                    db.execute("DELETE FROM access_codes WHERE hostname=?", (address["hostname"],))
+            except ValueError as exc:
+                flash(str(exc), "error")
+            else:
+                flash(f"Accès mis à jour : {len(emails) if shared else 0} adresse(s) autorisée(s).", "success")
+            return redirect(url_for("address_access", address_id=address_id))
+        emails = [row[0] for row in db.execute(
+            "SELECT email FROM address_grants WHERE address_id=? ORDER BY email", (address_id,),
+        )]
+        return render_template("address_access.html", address=address, emails=emails)
 
     @app.post("/addresses/<int:address_id>/delete")
     @_login_required
@@ -572,7 +624,8 @@ def create_app(config_override: dict | None = None) -> Flask:
     @app.get("/internal/caddy/ask")
     def caddy_ask():
         name = request.args.get("domain", "").lower().rstrip(".")
-        if name == app.config["DASHBOARD_HOST"]:
+        redirect_hosts = {host.strip() for host in app.config["REDIRECT_HOSTS"].split(",") if host.strip()}
+        if name == app.config["DASHBOARD_HOST"] or name in redirect_hosts:
             return "", 204
         row = get_db().execute(
             "SELECT 1 FROM addresses a JOIN domains d ON d.id=a.domain_id "
@@ -597,10 +650,10 @@ def create_app(config_override: dict | None = None) -> Flask:
         token = request.cookies.get(ACCESS_COOKIE, "")
         if token:
             found = get_db().execute(
-                "SELECT 1 FROM host_sessions WHERE token_hash=? AND hostname=? AND user_id=? AND expires_at>?",
-                (_hash_token(token), hostname, row["user_id"], int(time.time())),
+                "SELECT user_id FROM host_sessions WHERE token_hash=? AND hostname=? AND expires_at>?",
+                (_hash_token(token), hostname, int(time.time())),
             ).fetchone()
-            if found:
+            if found and _authorized_protected_user(hostname, found["user_id"]):
                 return "", 204
         original = request.headers.get("X-Forwarded-Uri", "/")
         if not original.startswith("/") or original.startswith("//"):
@@ -618,16 +671,16 @@ def create_app(config_override: dict | None = None) -> Flask:
         row = db.execute(
             "SELECT c.user_id,c.hostname,c.next_path FROM access_codes c "
             "JOIN users u ON u.id=c.user_id AND u.status='approved' "
-            "JOIN domains d ON d.user_id=u.id "
-            "JOIN addresses a ON a.domain_id=d.id AND a.hostname=c.hostname AND a.protected=1 "
             "WHERE c.code_hash=? AND c.hostname=? AND c.expires_at>?",
             (_hash_token(code), hostname, int(time.time())),
         ).fetchone()
-        if row is None:
+        if row is None or not _authorized_protected_user(hostname, row["user_id"]):
             abort(403)
         token = secrets.token_urlsafe(32)
         with db:
-            db.execute("DELETE FROM access_codes WHERE code_hash=?", (_hash_token(code),))
+            deleted = db.execute("DELETE FROM access_codes WHERE code_hash=?", (_hash_token(code),))
+            if deleted.rowcount != 1:
+                abort(403)
             db.execute(
                 "INSERT INTO host_sessions(token_hash,user_id,hostname,expires_at) VALUES(?,?,?,?)",
                 (_hash_token(token), row["user_id"], hostname, int(time.time()) + 43200),

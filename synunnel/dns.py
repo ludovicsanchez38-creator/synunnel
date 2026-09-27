@@ -1,6 +1,7 @@
 """Validation DNS, copie préalable et synchronisation PowerDNS."""
 
 import ipaddress
+import os
 import re
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -16,11 +17,17 @@ import dns.rdatatype
 import dns.resolver
 import requests
 
-NS_NAMES = ("ns1.synunnel.synoptia.fr.", "ns2.synunnel.synoptia.fr.")
 DEFAULT_DKIM = ("default", "selector1", "selector2", "google", "mail", "dkim", "k1", "s1", "s2", "brevo")
 RECORD_TYPES = {"A", "AAAA", "CNAME", "MX", "TXT", "CAA"}
 LABEL_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
 RECORD_LABEL_RE = re.compile(r"^_?[a-z0-9](?:[a-z0-9_-]{0,61}[a-z0-9])?$")
+
+
+def configured_nameservers() -> tuple[str, str]:
+    return (
+        os.getenv("NS1_HOST", "ns1.synunnel.fr").rstrip(".").lower() + ".",
+        os.getenv("NS2_HOST", "ns2.synunnel.fr").rstrip(".").lower() + ".",
+    )
 
 
 def normalize_domain(value: str) -> str:
@@ -32,8 +39,9 @@ def normalize_domain(value: str) -> str:
     labels = result.split(".")
     if len(labels) < 2 or len(result) > 253 or any(not LABEL_RE.fullmatch(x) for x in labels):
         raise ValueError("Nom de domaine invalide.")
-    if result == "synoptia.fr" or result.endswith(".synoptia.fr"):
-        raise ValueError("Les domaines de synoptia.fr sont réservés.")
+    if any(result == reserved or result.endswith(f".{reserved}")
+           for reserved in ("synoptia.fr", "synunnel.fr", "synunnel.com")):
+        raise ValueError("Ce domaine système est réservé.")
     return result
 
 
@@ -117,7 +125,7 @@ def snapshot_records(domain: str, selectors: list[str]) -> list[tuple[str, str, 
     return sorted(set(result))
 
 
-def delegation_status(domain: str, nameservers: tuple[str, str] = NS_NAMES) -> tuple[bool | None, list[str]]:
+def delegation_status(domain: str, nameservers: tuple[str, str] | None = None) -> tuple[bool | None, list[str]]:
     """Interroge directement les serveurs de la zone parente."""
     parent = dns.name.from_text(domain).parent().to_text()
     try:
@@ -135,14 +143,14 @@ def delegation_status(domain: str, nameservers: tuple[str, str] = NS_NAMES) -> t
         }
     except (dns.exception.DNSException, OSError, IndexError):
         return None, []
-    expected = set(nameservers)
+    expected = set(nameservers or configured_nameservers())
     return expected <= seen, sorted(seen)
 
 
 class PowerDNS:
-    def __init__(self, base_url: str, api_key: str, nameservers: tuple[str, str] = NS_NAMES):
+    def __init__(self, base_url: str, api_key: str, nameservers: tuple[str, str] | None = None):
         self.base_url = base_url.rstrip("/")
-        self.nameservers = nameservers
+        self.nameservers = nameservers or configured_nameservers()
         self.session = requests.Session()
         self.session.headers.update({"X-API-Key": api_key, "Content-Type": "application/json"})
 
@@ -158,6 +166,31 @@ class PowerDNS:
 
     def delete_zone(self, domain: str) -> None:
         self._request("DELETE", f"/zones/{domain}.")
+
+    def migrate_authority(self, domain: str, soa_rname: str) -> bool:
+        """Remplace les NS et le SOA d'une zone existante, sans toucher aux autres RRsets."""
+        apex = f"{domain}."
+        rrsets = self._request("GET", f"/zones/{apex}").json()["rrsets"]
+        soa = next((item for item in rrsets if item["name"] == apex and item["type"] == "SOA"), None)
+        ns = next((item for item in rrsets if item["name"] == apex and item["type"] == "NS"), None)
+        if not soa or len(soa["records"]) != 1 or not ns:
+            raise ValueError(f"SOA ou NS manquant dans {apex}")
+        parts = soa["records"][0]["content"].split()
+        if len(parts) != 7:
+            raise ValueError(f"SOA invalide dans {apex}")
+        desired_ns = set(self.nameservers)
+        current_ns = {record["content"] for record in ns["records"] if not record["disabled"]}
+        if parts[0] == self.nameservers[0] and parts[1] == soa_rname and current_ns == desired_ns:
+            return False
+        parts[0], parts[1] = self.nameservers[0], soa_rname
+        parts[2] = str(int(parts[2]) + 1)
+        self._request("PATCH", f"/zones/{apex}", json={"rrsets": [
+            {"name": apex, "type": "SOA", "ttl": soa["ttl"], "changetype": "REPLACE",
+             "records": [{"content": " ".join(parts), "disabled": False}]},
+            {"name": apex, "type": "NS", "ttl": ns["ttl"], "changetype": "REPLACE",
+             "records": [{"content": name, "disabled": False} for name in self.nameservers]},
+        ]})
+        return True
 
     def sync_zone(self, db, domain_id: int, domain: str, public_ipv4: str, public_ipv6: str) -> None:
         current = self._request("GET", f"/zones/{domain}.").json()["rrsets"]

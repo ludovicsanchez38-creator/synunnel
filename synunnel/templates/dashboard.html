@@ -23,10 +23,10 @@
     <form method="post" action="{{ url_for('add_address') }}">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <label>Domaine<select name="domain_id" required><option value="">Choisir</option>{% for domain in domains %}<option value="{{ domain.id }}">{{ domain.name }}</option>{% endfor %}</select></label>
-      <label>Nom d'hôte<input name="name" placeholder="nas" required></label>
+      <label>Nom d'hôte <span class="hint">@ pour la racine du domaine</span><input name="name" placeholder="nas ou @" required></label>
       <label>Machine<select name="machine_id" required><option value="">Choisir</option>{% for machine in machines %}<option value="{{ machine.id }}">{{ machine.name }} ({{ machine.ip }})</option>{% endfor %}</select></label>
       <label>Port local<input name="port" type="number" min="1" max="65535" placeholder="5000" required></label>
-      <label class="check"><input type="checkbox" name="protected" value="1"><span>Réserver l'accès à ma connexion Synunnel</span></label>
+      <label class="check"><input type="checkbox" name="protected" value="1"><span>Réserver l'accès à ma connexion Synunnel. Une liste d'adresses mail pourra ensuite partager l'accès.</span></label>
       <button class="button" type="submit">Créer l'adresse</button>
     </form>
   </section>
@@ -35,5 +35,5 @@
   <section class="card"><h2>Domaines</h2>{% if domains %}<ul class="item-list">{% for domain in domains %}<li><a href="{{ url_for('domain_detail', domain_id=domain.id) }}">{{ domain.name }}</a><span>Voir la zone</span></li>{% endfor %}</ul>{% else %}<p class="empty">Aucun domaine pour le moment.</p>{% endif %}</section>
   <section class="card"><h2>Machines</h2>{% if machines %}<ul class="item-list">{% for machine in machines %}<li><div><strong>{{ machine.name }}</strong><span>{{ machine.ip }}</span></div><form method="post" action="{{ url_for('delete_machine', machine_id=machine.id) }}"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="quiet" type="submit">Supprimer</button></form></li>{% endfor %}</ul>{% else %}<p class="empty">Aucune machine connectée.</p>{% endif %}</section>
 </div>
-<section class="card wide"><h2>Adresses</h2>{% if addresses %}<div class="table-wrap"><table><thead><tr><th>Adresse</th><th>Machine</th><th>Port</th><th>Accès</th><th></th></tr></thead><tbody>{% for address in addresses %}<tr><td><strong>{{ address.hostname }}</strong></td><td>{{ address.machine_name }}</td><td>{{ address.port }}</td><td>{{ 'Connexion requise' if address.protected else 'Public' }}</td><td><form method="post" action="{{ url_for('delete_address', address_id=address.id) }}"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="quiet" type="submit">Supprimer</button></form></td></tr>{% endfor %}</tbody></table></div>{% else %}<p class="empty">Aucune adresse publiée.</p>{% endif %}</section>
+<section class="card wide"><h2>Adresses</h2>{% if addresses %}<div class="table-wrap"><table><thead><tr><th>Adresse</th><th>Machine</th><th>Port</th><th>Accès</th><th></th></tr></thead><tbody>{% for address in addresses %}<tr><td><strong>{{ address.hostname }}</strong></td><td>{{ address.machine_name }}</td><td>{{ address.port }}</td><td>{% if address.protected %}<a href="{{ url_for('address_access', address_id=address.id) }}">{{ 'Partagé · ' ~ address.grant_count ~ ' adresse(s)' if address.shared else 'Moi uniquement' }}</a>{% else %}Public{% endif %}</td><td><form method="post" action="{{ url_for('delete_address', address_id=address.id) }}"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="quiet" type="submit">Supprimer</button></form></td></tr>{% endfor %}</tbody></table></div>{% else %}<p class="empty">Aucune adresse publiée.</p>{% endif %}</section>
 {% endblock %}

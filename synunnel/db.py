@@ -49,9 +49,16 @@ CREATE TABLE IF NOT EXISTS addresses (
     hostname TEXT NOT NULL UNIQUE,
     port INTEGER NOT NULL CHECK(port BETWEEN 1 AND 65535),
     protected INTEGER NOT NULL DEFAULT 0,
+    shared INTEGER NOT NULL DEFAULT 0 CHECK(shared IN (0, 1)),
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_addresses_host ON addresses(hostname);
+CREATE TABLE IF NOT EXISTS address_grants (
+    address_id INTEGER NOT NULL REFERENCES addresses(id) ON DELETE CASCADE,
+    email TEXT NOT NULL,
+    PRIMARY KEY(address_id, email)
+);
+CREATE INDEX IF NOT EXISTS idx_address_grants_email ON address_grants(email);
 CREATE TABLE IF NOT EXISTS access_codes (
     code_hash TEXT PRIMARY KEY,
     user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -111,4 +118,8 @@ def init_db() -> None:
     db = get_db()
     db.execute("PRAGMA journal_mode=WAL")
     db.executescript(SCHEMA)
+    # Migration des bases du premier MVP. Le verrou sérialise deux workers au démarrage.
+    db.execute("BEGIN IMMEDIATE")
+    if "shared" not in {row[1] for row in db.execute("PRAGMA table_info(addresses)")}:
+        db.execute("ALTER TABLE addresses ADD COLUMN shared INTEGER NOT NULL DEFAULT 0 CHECK(shared IN (0, 1))")
     db.commit()

@@ -56,8 +56,8 @@ def main() -> None:
         raise SystemExit("L'espace réseau de test existe déjà ; aucune donnée n'a été touchée.")
 
     pdns = PowerDNS(values["PDNS_API_URL"], values["PDNS_API_KEY"], (
-        f"{values.get('NS1_HOST', 'ns1.synunnel.synoptia.fr')}.",
-        f"{values.get('NS2_HOST', 'ns2.synunnel.synoptia.fr')}.",
+        f"{values.get('NS1_HOST', 'ns1.synunnel.fr')}.",
+        f"{values.get('NS2_HOST', 'ns2.synunnel.fr')}.",
     ))
     original_caddy = CONFIG.read_text()
     private = run("wg", "genkey").stdout.strip()
@@ -162,6 +162,25 @@ def main() -> None:
         if not any(line.split()[0] == public and int(line.split()[1]) > 0 for line in handshakes):
             raise AssertionError("La poignée de main WireGuard manque.")
         print("Page HTTPS via Caddy et service derrière le pair WireGuard : OK")
+
+        dashboard_host = values["DASHBOARD_HOST"]
+        dashboard = run(
+            "curl", "--noproxy", "*", "--silent", "--show-error", "--insecure", "--max-time", "8",
+            "--resolve", f"{dashboard_host}:443:{values['PUBLIC_IPV4']}",
+            f"https://{dashboard_host}/login",
+        ).stdout
+        if "Synunnel" not in dashboard:
+            raise AssertionError("Le tableau de bord configuré ne répond pas.")
+        print(f"Tableau de bord HTTPS sur {dashboard_host} via --resolve : OK")
+        for alias in values["REDIRECT_HOSTS"].split(","):
+            redirected = run(
+                "curl", "--noproxy", "*", "--silent", "--show-error", "--insecure", "--max-time", "8",
+                "--resolve", f"{alias}:443:{values['PUBLIC_IPV4']}",
+                "--dump-header", "-", "--output", "/dev/null", f"https://{alias}/essai",
+            ).stdout.lower()
+            if " 308 " not in redirected or f"location: https://{dashboard_host}/essai" not in redirected:
+                raise AssertionError(f"Redirection absente pour {alias}.")
+        print("Redirections synunnel.com et www en HTTPS via --resolve : OK")
 
         guarded = run(
             "curl", "--noproxy", "*", "--silent", "--show-error", "--insecure", "--max-time", "8",

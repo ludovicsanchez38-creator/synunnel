@@ -3,3 +3,4 @@
 @media(max-width:950px){.step-grid{grid-template-columns:1fr 1fr}.step-grid .card:last-child{grid-column:1/-1}.auth-layout{gap:5vw}}
 @media(max-width:680px){.shell{padding:0 18px}.topbar{align-items:flex-start}.topbar nav{gap:10px;flex-wrap:wrap;justify-content:flex-end}.identity{display:none}main{padding:32px 0 48px}.auth-layout,.step-grid,.list-grid{display:block;min-height:auto}.auth-card{margin-top:28px}.card{margin-bottom:16px;padding:21px}.page-head h1,.intro h1{font-size:35px}}
 table td form:not(.inline){display:block;margin:0}table td:last-child,table th:last-child{text-align:right}
+.access-card{max-width:720px}.access-card textarea{resize:vertical;line-height:1.5}

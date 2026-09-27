@@ -54,6 +54,15 @@ def register_approve_login(app, client, email: str) -> int:
     return user_id
 
 
+def login_dashboard(client, email: str) -> None:
+    page = client.get("/login", base_url="https://synunnel.fr")
+    token = re.search(rb'name="csrf_token" value="([^"]+)"', page.data).group(1).decode()
+    response = client.post("/login", base_url="https://synunnel.fr", data={
+        "csrf_token": token, "email": email, "password": "mot-de-passe-long-123",
+    })
+    assert response.status_code == 302
+
+
 def add_domain(client, name: str) -> int:
     response = client.post("/domains", data={
         "csrf_token": csrf(client), "domain": name, "mail_checked": "1", "selectors": "",
@@ -143,13 +152,14 @@ def test_ask_and_protected_address_callback_is_single_use(app):
     })
     assert client.get("/internal/caddy/ask?domain=unknown.owner.example.net").status_code == 403
     assert client.get("/internal/caddy/ask?domain=private.owner.example.net").status_code == 204
-    assert client.get("/internal/caddy/ask?domain=synunnel.synoptia.fr").status_code == 204
+    assert client.get("/internal/caddy/ask?domain=synunnel.fr").status_code == 204
+    assert client.get("/internal/caddy/ask?domain=www.synunnel.com").status_code == 204
     browser = app.test_client()
     denied = browser.get("/internal/caddy/auth", base_url="https://private.owner.example.net", headers={"X-Forwarded-Uri": "/hello"})
     assert denied.status_code == 302
-    login_page = browser.get("/login", base_url="https://synunnel.synoptia.fr")
+    login_page = browser.get("/login", base_url="https://synunnel.fr")
     login_csrf = re.search(rb'name="csrf_token" value="([^"]+)"', login_page.data).group(1).decode()
-    approved = browser.post("/login", base_url="https://synunnel.synoptia.fr", data={
+    approved = browser.post("/login", base_url="https://synunnel.fr", data={
         "csrf_token": login_csrf, "email": "owner@example.net", "password": "mot-de-passe-long-123",
         "next": "https://private.owner.example.net/hello",
     })
@@ -184,3 +194,95 @@ def test_rate_limit_and_machine_private_key_not_persisted(app):
     for _ in range(4):
         assert guest.post("/register", data={"csrf_token": token, "email": "invalide", "password": "x"}).status_code == 400
     assert guest.post("/register", data={"csrf_token": token, "email": "invalide", "password": "x"}).status_code == 429
+
+
+def test_shared_access_list_revocation_pending_and_other_owner(app):
+    owner = app.test_client()
+    listed = app.test_client()
+    unlisted = app.test_client()
+    pending = app.test_client()
+    other_owner = app.test_client()
+    owner_id = register_approve_login(app, owner, "owner@example.net")
+    register_approve_login(app, listed, "listed@example.net")
+    register_approve_login(app, unlisted, "unlisted@example.net")
+    register_approve_login(app, other_owner, "other@example.net")
+    login_dashboard(owner, "owner@example.net")
+    login_dashboard(listed, "listed@example.net")
+    login_dashboard(unlisted, "unlisted@example.net")
+    login_dashboard(other_owner, "other@example.net")
+    domain_id = add_domain(owner, "shared.example.net")
+    with app.app_context():
+        db = get_db()
+        machine_id = db.execute(
+            "INSERT INTO machines(user_id,name,ip,public_key,created_at) VALUES(?,?,?,?,?)",
+            (owner_id, "shared", "10.88.0.2", "c" * 44, "2026-09-27"),
+        ).lastrowid
+        db.commit()
+    assert owner.post("/addresses", data={
+        "csrf_token": csrf(owner), "domain_id": domain_id, "machine_id": machine_id,
+        "name": "private", "port": "8080", "protected": "1",
+    }).status_code == 302
+    with app.app_context():
+        address_id = get_db().execute(
+            "SELECT id FROM addresses WHERE hostname='private.shared.example.net'",
+        ).fetchone()[0]
+    path = f"/addresses/{address_id}/access"
+    assert other_owner.get(path).status_code == 404
+    assert other_owner.post(path, data={"csrf_token": csrf(other_owner), "shared": "1",
+                                        "emails": "other@example.net"}).status_code == 404
+    assert owner.post(path, data={"csrf_token": csrf(owner), "shared": "1",
+                                  "emails": "listed@example.net, pending@example.net"}).status_code == 302
+    host = "https://private.shared.example.net"
+    next_url = host + "/hello"
+    approved = listed.get("/login", base_url="https://synunnel.fr", query_string={"next": next_url})
+    assert approved.status_code == 302
+    callback = urlsplit(approved.headers["Location"])
+    assert callback.hostname == "private.shared.example.net"
+    assert listed.get(callback.path + "?" + callback.query, base_url=host).status_code == 302
+    assert listed.get("/internal/caddy/auth", base_url=host).status_code == 204
+    assert owner.get("/login", base_url="https://synunnel.fr", query_string={"next": next_url}).status_code == 302
+
+    assert unlisted.get("/login", base_url="https://synunnel.fr", query_string={"next": next_url}).headers["Location"] == "/dashboard"
+    assert other_owner.get("/login", base_url="https://synunnel.fr", query_string={"next": next_url}).headers["Location"] == "/dashboard"
+    token = csrf(pending)
+    assert pending.post("/register", data={"csrf_token": token, "email": "pending@example.net",
+                                           "password": "mot-de-passe-long-123"}).status_code == 302
+    assert pending.post("/login", data={"csrf_token": token, "email": "pending@example.net",
+                                        "password": "mot-de-passe-long-123", "next": next_url}).status_code == 403
+    assert pending.get("/internal/caddy/auth", base_url=host).status_code == 302
+
+    admin = {"Authorization": "Bearer test-admin-token-only"}
+    pending_id = next(item["id"] for item in owner.get("/admin/api/pending", headers=admin).json["pending"]
+                      if item["email"] == "pending@example.net")
+    assert owner.post(f"/admin/api/users/{pending_id}/reject", headers=admin).status_code == 200
+    assert pending.post("/login", data={"csrf_token": token, "email": "pending@example.net",
+                                        "password": "mot-de-passe-long-123", "next": next_url}).status_code == 401
+
+    assert owner.post(path, data={"csrf_token": csrf(owner), "shared": "1",
+                                  "emails": "pending@example.net"}).status_code == 302
+    # Le navigateur conserve le cookie d'accès, mais le contrôle relit la liste.
+    assert listed.get("/internal/caddy/auth", base_url=host).status_code == 302
+    with app.app_context():
+        assert get_db().execute(
+            "SELECT COUNT(*) FROM host_sessions WHERE hostname=?", ("private.shared.example.net",),
+        ).fetchone()[0] == 0
+
+
+def test_apex_address_keeps_copied_mail_records(app):
+    client = app.test_client()
+    owner_id = register_approve_login(app, client, "apex@example.net")
+    domain_id = add_domain(client, "apex.example.net")
+    with app.app_context():
+        db = get_db()
+        machine_id = db.execute(
+            "INSERT INTO machines(user_id,name,ip,public_key,created_at) VALUES(?,?,?,?,?)",
+            (owner_id, "landing", "10.88.0.3", "d" * 44, "2026-09-27"),
+        ).lastrowid
+        db.commit()
+    assert client.post("/addresses", data={"csrf_token": csrf(client), "domain_id": domain_id,
+                                          "machine_id": machine_id, "name": "@", "port": "18080",
+                                          "protected": "1"}).status_code == 302
+    with app.app_context():
+        db = get_db()
+        assert db.execute("SELECT hostname FROM addresses WHERE domain_id=?", (domain_id,)).fetchone()[0] == "apex.example.net"
+        assert db.execute("SELECT COUNT(*) FROM records WHERE domain_id=? AND type='MX'", (domain_id,)).fetchone()[0] == 1
