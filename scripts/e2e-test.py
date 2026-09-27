@@ -18,6 +18,7 @@ from synunnel.dns import PowerDNS
 
 DOMAIN = "e2e.synunnel.test"
 HOST = f"nas.{DOMAIN}"
+PROTECTED = f"prive.{DOMAIN}"
 UNKNOWN = f"inconnu.{DOMAIN}"
 EMAIL = "e2e@synunnel.invalid"
 NS = "sn-e2e"
@@ -100,6 +101,11 @@ def main() -> None:
                 "VALUES(?,?,?,?,0,?)",
                 (domain_id, machine_id, HOST, 18080, "2026-09-27T00:00:00Z"),
             )
+            db.execute(
+                "INSERT INTO addresses(domain_id,machine_id,hostname,port,protected,created_at) "
+                "VALUES(?,?,?,?,1,?)",
+                (domain_id, machine_id, PROTECTED, 18080, "2026-09-27T00:00:00Z"),
+            )
             pdns.sync_zone(db, domain_id, DOMAIN, values["PUBLIC_IPV4"], values["PUBLIC_IPV6"])
         run("/usr/local/sbin/synunnel-sync")
 
@@ -156,6 +162,15 @@ def main() -> None:
         if not any(line.split()[0] == public and int(line.split()[1]) > 0 for line in handshakes):
             raise AssertionError("La poignée de main WireGuard manque.")
         print("Page HTTPS via Caddy et service derrière le pair WireGuard : OK")
+
+        guarded = run(
+            "curl", "--noproxy", "*", "--silent", "--show-error", "--insecure", "--max-time", "8",
+            "--resolve", f"{PROTECTED}:443:{values['PUBLIC_IPV4']}",
+            "--dump-header", "-", "--output", "/dev/null", f"https://{PROTECTED}/",
+        ).stdout.lower()
+        if " 302 " not in guarded or f"location: https://{values['DASHBOARD_HOST']}/login?" not in guarded:
+            raise AssertionError(f"La route protégée ne redirige pas vers la connexion : {guarded[:300]!r}")
+        print("Adresse protégée redirigée par Caddy vers la connexion : OK")
 
         rejected = run(
             "curl", "--noproxy", "*", "--silent", "--show-error", "--insecure", "--max-time", "8",

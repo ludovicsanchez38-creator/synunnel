@@ -73,7 +73,7 @@ sudo systemctl status pdns caddy wg-quick@wg0 synunnel
 sudo journalctl -u synunnel -n 100 --no-pager
 ```
 
-L'essai intégré crée un domaine `.test`, un pair WireGuard dans un espace réseau local et une page de test. Il bascule temporairement Caddy sur sa CA interne, puis restaure la configuration et supprime les données de test. Ne le lancer qu'en fenêtre de maintenance si des utilisateurs réels sont actifs :
+L'essai intégré crée un domaine `.test`, un pair WireGuard dans un espace réseau local et une page de test. Il vérifie aussi la redirection d'une adresse protégée et le refus d'un nom inconnu. Il bascule temporairement Caddy sur sa CA interne, puis restaure la configuration et supprime les données de test. Ne le lancer qu'en fenêtre de maintenance si des utilisateurs réels sont actifs :
 
 ```bash
 sudo .venv/bin/python scripts/e2e-test.py
