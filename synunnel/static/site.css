@@ -45,7 +45,7 @@ a:hover { text-decoration: underline; }
 .brand svg { flex: none; }
 .badge { font-size: 11px; font-weight: 600; color: var(--accent); background: var(--accent-soft); border-radius: 999px; padding: 2px 8px; letter-spacing: 0.02em; }
 .topbar nav { display: flex; align-items: center; gap: 20px; font-size: 14px; }
-.topbar nav a { color: var(--sub); }
+.topbar nav a { color: var(--sub); white-space: nowrap; }
 .topbar nav a:hover { color: var(--text); text-decoration: none; }
 .identity { color: var(--faint); font-size: 13px; }
 main.shell { flex: 1; width: 100%; padding-top: 40px; padding-bottom: 56px; }
@@ -120,7 +120,7 @@ table td:last-child, table th:last-child { text-align: right; }
 .status { display: inline-flex !important; align-items: center; gap: 8px; padding: 6px 10px; border-radius: 999px; font-size: 13px !important; font-weight: 600; background: var(--warn-bg); color: var(--warn) !important; border: 1px solid var(--warn-line); }
 .status.ok { background: var(--ok-bg); color: var(--ok) !important; border-color: var(--ok-line); }
 .code-line { font: 13px ui-monospace, SFMono-Regular, Menlo, monospace; background: var(--muted-bg); border: 1px solid var(--line); padding: 9px 12px; border-radius: 8px; margin: 6px 0; overflow-wrap: anywhere; }
-.back { display: inline-block; margin-bottom: 14px; color: var(--sub); font-size: 13px; }
+.back { display: block; width: fit-content; margin-bottom: 14px; color: var(--sub); font-size: 13px; }
 .secret-card textarea { min-height: 260px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; line-height: 1.5; background: var(--muted-bg); }
 .secret-card .button { margin-top: 12px; }
 .access-card { max-width: 720px; }
@@ -135,6 +135,7 @@ table td:last-child, table th:last-child { text-align: right; }
   .topbar, .shell { padding: 0 16px; }
   .topbar nav { gap: 12px; }
   .identity { display: none; }
+  .nav-secondary { display: none; }
   main.shell { padding-top: 28px; }
   .auth-layout, .step-grid, .list-grid { display: block; min-height: auto; }
   .auth-card { margin-top: 24px; justify-self: stretch; max-width: none; }

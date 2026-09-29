@@ -23,7 +23,7 @@
           <span class="identity">{{ current_user.email }}</span>
           <form class="inline" action="{{ url_for('logout') }}" method="post"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="text-button" type="submit">Déconnexion</button></form>
         {% else %}
-          <a href="{{ url_for('login') }}">Connexion</a>
+          <a class="nav-secondary" href="{{ url_for('login') }}">Connexion</a>
           <a href="{{ url_for('register') }}">Demander un accès</a>
         {% endif %}
       </nav>
