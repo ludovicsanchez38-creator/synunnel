@@ -245,6 +245,12 @@ def main() -> None:
                 http_server.kill()
                 http_server.wait(timeout=3)
 
+        def drop_veth() -> None:
+            # Supprimer l'espace réseau emporte la paire veth : l'interface peut déjà avoir disparu.
+            result = run("ip", "link", "delete", VETH_HOST, check=False)
+            if result.returncode != 0 and VETH_HOST in run("ip", "-o", "link", "show").stdout:
+                raise RuntimeError(result.stderr.strip())
+
         def drop_user() -> None:
             with db:
                 db.execute("DELETE FROM users WHERE email=?", (EMAIL,))
@@ -255,8 +261,7 @@ def main() -> None:
             attempt("serveur HTTP", stop_http)
         if netns_created:
             attempt("espace réseau", lambda: run("ip", "netns", "delete", NS))
-            if VETH_HOST in run("ip", "-o", "link", "show").stdout:
-                attempt("interface veth", lambda: run("ip", "link", "delete", VETH_HOST))
+            attempt("interface veth", drop_veth)
         attempt("compte de test", drop_user)
         if zone_created:
             attempt("zone PowerDNS", lambda: pdns.delete_zone(DOMAIN))
