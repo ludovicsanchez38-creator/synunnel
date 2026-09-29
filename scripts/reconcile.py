@@ -57,7 +57,7 @@ def main() -> int:
         # 3. Zones de domaines supprimés, pas encore retirées de PowerDNS, dans un sous-budget et en commençant
         #    chaque fois ailleurs : des relevés qui traînent ne privent jamais les zones actives de leur temps.
         nameservers = (f"{app.config['NS1_HOST']}.", f"{app.config['NS2_HOST']}.")
-        removals = db.execute("SELECT name, forced FROM zone_removals ORDER BY at, name").fetchall()
+        removals = db.execute("SELECT name, forced, generation FROM zone_removals ORDER BY at, name").fetchall()
         if removals:
             offset = int(time.time() // 300) % len(removals)
             removals = removals[offset:] + removals[:offset]
@@ -75,7 +75,8 @@ def main() -> int:
                 print(f"Zone {row['name']} gardée : la délégation désigne encore l'instance ou ne se vérifie pas.",
                       file=sys.stderr)
                 continue
-            if not remove_zone(app, row["name"]):
+            # L'effacement revérifie, sous transaction, que ce retrait-ci est toujours celui en base.
+            if not remove_zone(app, row["name"], generation=row["generation"]):
                 failures += 1
                 print(f"Zone {row['name']} supprimée en base, pas encore dans PowerDNS.", file=sys.stderr)
         # 4. Zones DNS dans un budget de temps, en commençant chaque fois ailleurs : une zone lente ou un

@@ -537,19 +537,28 @@ def delete_record(app: Flask, user_id: int, domain_id: int, record_id: int, guar
     return {"synced": project_zone(app, domain)}
 
 
-def remove_zone(app: Flask, name: str) -> bool:
-    """Retire une zone de PowerDNS ; en cas d'échec, la pierre tombale reste et le rapprochement réessaie."""
+def remove_zone(app: Flask, name: str, generation: str | None = None) -> bool:
+    """Retire une zone de PowerDNS ; en cas d'échec, la pierre tombale reste et le rapprochement réessaie.
+
+    Avec une génération (rapprochement), le retrait n'a lieu que si la pierre tombale en base porte encore
+    cette génération, relue sous transaction juste avant l'effacement : un nom recréé, ou supprimé de
+    nouveau entre-temps, n'est jamais effacé au titre d'une autorisation plus ancienne.
+    """
     lock = zone_lock(app, name) if app.config["PDNS_ENABLED"] else None
     try:
         db = get_db()
-        if db.execute("SELECT 1 FROM domains WHERE name=?", (name,)).fetchone():
-            # Le nom a une nouvelle incarnation : l'ancienne suppression ne la vise pas.
-            with db:
-                db.execute("DELETE FROM zone_removals WHERE name=?", (name,))
-            return True
-        if lock is not None:
-            _pdns(app).delete_zone(name)
         with db:
+            db.execute("BEGIN IMMEDIATE")
+            if db.execute("SELECT 1 FROM domains WHERE name=?", (name,)).fetchone():
+                # Le nom a une nouvelle incarnation : l'ancienne suppression ne la vise pas.
+                db.execute("DELETE FROM zone_removals WHERE name=?", (name,))
+                return True
+            if generation is not None:
+                row = db.execute("SELECT generation FROM zone_removals WHERE name=?", (name,)).fetchone()
+                if row is None or row["generation"] != generation:
+                    return True
+            if lock is not None:
+                _pdns(app).delete_zone(name)
             db.execute("DELETE FROM zone_removals WHERE name=?", (name,))
     except requests.RequestException:
         return False
@@ -605,11 +614,12 @@ def delete_domain(app: Flask, user_id: int | None, domain_id: int, guard: Guard 
             db.execute("DELETE FROM access_codes WHERE hostname=?", (hostname,))
         db.execute("DELETE FROM domain_claims WHERE domain_id=?", (domain_id,))
         db.execute("DELETE FROM domains WHERE id=?", (domain_id,))
-        db.execute("INSERT OR REPLACE INTO zone_removals(name, at, forced) VALUES(?,?,?)",
-                   (domain["name"], now_iso(), int(force)))
+        generation = secrets.token_hex(8)
+        db.execute("INSERT OR REPLACE INTO zone_removals(name, at, forced, generation) VALUES(?,?,?,?)",
+                   (domain["name"], now_iso(), int(force), generation))
         if audit:
             audit(db, "domain.delete", f"domain:{domain_id} {domain['name']}")
-    synced = remove_zone(app, domain["name"])
+    synced = remove_zone(app, domain["name"], generation=generation)
     if hostnames:
         synced = project_runtime(app) and synced
     return {"synced": synced, "name": domain["name"]}

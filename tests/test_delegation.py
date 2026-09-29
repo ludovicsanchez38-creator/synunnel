@@ -41,7 +41,12 @@ def parent(monkeypatch):
             self.target = dns.name.from_text(name)
 
     def resolve(name, kind, lifetime=None):
-        return [Target(host) for host in addresses] if kind == "NS" else [addresses[str(name)]]
+        import time
+
+        if kind == "NS":
+            time.sleep(state.get("discovery", 0))
+            return [Target(host) for host in addresses]
+        return [addresses[str(name)]]
 
     def udp(query, where, timeout=None, **kwargs):
         state["udp_calls"] += 1
@@ -286,7 +291,7 @@ def test_forced_admin_removal_is_completed_even_while_still_delegated(app, monke
     client = app.test_client()
     register_approve_login(app, client, "forcee@example.org")
     add_domain(client, "forcee.example")
-    monkeypatch.setattr("synunnel.actions.remove_zone", lambda app_, name: False)  # PowerDNS en échec
+    monkeypatch.setattr("synunnel.actions.remove_zone", lambda app_, name, generation=None: False)  # PowerDNS en échec
     reply = client.post("/admin/api/domains/delete", json={"name": "forcee.example"},
                         headers={"Authorization": "Bearer test-admin-token-only"})
     assert reply.status_code == 200 and reply.json["synced"] is False
@@ -366,3 +371,56 @@ def test_owner_deletion_can_be_reserved_to_the_administrator_without_touching_th
     forced = client.post("/admin/api/domains/delete", json={"name": "reserve.example"},
                          headers={"Authorization": "Bearer test-admin-token-only"})
     assert forced.status_code == 200 and not _domain_exists(app, domain_id)
+
+
+
+def test_delegation_deadline_counts_from_the_start_discovery_included(parent, monkeypatch):
+    """Quatrième passe Codex, constat 23 : le délai « global » ne partait qu'après la découverte des
+    serveurs parents."""
+    import time
+
+    monkeypatch.setattr("synunnel.dns.DELEGATION_DEADLINE", 0.4)
+    parent["discovery"] = 0.3
+    parent["response"] = _response(authority=[(DOMAIN, "NS", "ns1.hebergeur.net.")])
+    parent["slow"] = {"9.9.9.9"}
+    started = time.monotonic()
+    assert synunnel_dns.delegation_status("client.example", OURS)[0] is None
+    assert time.monotonic() - started < 0.6
+
+
+def test_a_stale_removal_authorisation_never_erases_a_newer_incarnation(app, monkeypatch):
+    """Quatrième passe Codex, constat 22 : un retrait forcé lu au début du rapprochement servait encore
+    après que le même nom avait été recréé puis supprimé normalement (retrait non forcé, délégation revenue).
+    Chaque retrait porte une génération, revérifiée sous transaction juste avant l'effacement."""
+    from synunnel import actions
+    from synunnel.db import get_db, init_db
+
+    with app.app_context():
+        init_db()
+        db = get_db()
+        with db:
+            db.execute("INSERT INTO zone_removals(name,at,forced,generation) "
+                       "VALUES('reprise.example','2026-09-29T00:00:00',1,'ancienne')")
+    real_remove = actions.remove_zone
+    seen = []
+
+    def recreate_then_remove(app_, name, generation=None):
+        # Entre l'autorisation lue et l'effacement : le nom est recréé, puis supprimé par son titulaire
+        # (PowerDNS en échec) ; la délégation, elle, désigne de nouveau l'instance.
+        db = get_db()
+        with db:
+            db.execute("INSERT INTO domains(user_id,name,created_at) SELECT id,'reprise.example','2026-09-30' "
+                       "FROM users LIMIT 1")
+            db.execute("DELETE FROM domains WHERE name='reprise.example'")
+            db.execute("INSERT OR REPLACE INTO zone_removals(name,at,forced,generation) "
+                       "VALUES('reprise.example','2026-09-30T00:00:00',0,'nouvelle')")
+        seen.append(generation)
+        return real_remove(app_, name, generation=generation)
+
+    client = app.test_client()
+    register_approve_login(app, client, "reprise@example.org")
+    _run_reconcile(app, monkeypatch, remove_zone=recreate_then_remove,
+                   delegation_status=lambda domain, ns: (True, list(OURS)))
+    with app.app_context():
+        row = get_db().execute("SELECT forced, generation FROM zone_removals WHERE name='reprise.example'").fetchone()
+    assert seen == ["ancienne"] and row is not None and tuple(row) == (0, "nouvelle")

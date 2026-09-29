@@ -236,19 +236,22 @@ def delegation_status(domain: str, nameservers: tuple[str, str] | None = None) -
     l'instance l'emporte sur les autres. Une suppression ne s'appuie que sur False, et encore faut-il
     qu'aucun serveur de l'instance ne figure dans la liste (voir still_designated).
     """
+    # Échéance fixée dès l'entrée : la découverte des serveurs parents compte dans le délai global.
+    deadline = time.monotonic() + DELEGATION_DEADLINE
     name = dns.name.from_text(domain)
     expected = {item.lower() for item in (nameservers or configured_nameservers())}
     try:
-        hosts = sorted({item.target.to_text() for item in dns.resolver.resolve(name.parent(), "NS", lifetime=2)})
+        hosts = sorted({item.target.to_text() for item in dns.resolver.resolve(
+            name.parent(), "NS", lifetime=max(0.1, min(2.0, deadline - time.monotonic())))})
     except (dns.exception.DNSException, OSError):
         return None, []
-    if not hosts or len(hosts) > MAX_PARENT_SERVERS:
+    if not hosts or len(hosts) > MAX_PARENT_SERVERS or time.monotonic() >= deadline:
         return None, []
     pool = ThreadPoolExecutor(max_workers=len(hosts))
     futures = [pool.submit(_ask_parent_server, name, host, expected) for host in hosts]
     results = []
     try:
-        for future in as_completed(futures, timeout=DELEGATION_DEADLINE):
+        for future in as_completed(futures, timeout=max(0.0, deadline - time.monotonic())):
             results.append(future.result())
     except TimeoutError:
         results.append((None, set()))

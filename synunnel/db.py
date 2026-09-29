@@ -131,7 +131,8 @@ CREATE TABLE IF NOT EXISTS invitations (
 CREATE TABLE IF NOT EXISTS zone_removals (
     name TEXT PRIMARY KEY,
     at TEXT NOT NULL,
-    forced INTEGER NOT NULL DEFAULT 0 CHECK(forced IN (0, 1))
+    forced INTEGER NOT NULL DEFAULT 0 CHECK(forced IN (0, 1)),
+    generation TEXT
 );
 CREATE TABLE IF NOT EXISTS id_counters (
     name TEXT PRIMARY KEY,
@@ -329,6 +330,9 @@ def init_db() -> None:
     if "forced" not in {row[1] for row in db.execute("PRAGMA table_info(zone_removals)")}:
         # Retrait forcé par l'administrateur : repris jusqu'au bout après un échec PowerDNS.
         db.execute("ALTER TABLE zone_removals ADD COLUMN forced INTEGER NOT NULL DEFAULT 0 CHECK(forced IN (0, 1))")
+    if "generation" not in {row[1] for row in db.execute("PRAGMA table_info(zone_removals)")}:
+        # Génération de chaque retrait : une autorisation lue plus tôt ne sert jamais à un retrait plus récent.
+        db.execute("ALTER TABLE zone_removals ADD COLUMN generation TEXT")
     if "domain_id" not in {row[1] for row in db.execute("PRAGMA table_info(domain_claims)")}:
         db.execute("ALTER TABLE domain_claims ADD COLUMN domain_id INTEGER")
     for table in ("users", "access_codes", "host_sessions"):
