@@ -35,6 +35,8 @@ La délégation est observée directement auprès d'un serveur de la zone parent
 
 **API pour agents.** `synunnel/api.py` expose `/api/v1` (voir [API.md](API.md)). Les routes du tableau de bord et de l'API appellent les mêmes fonctions de `synunnel/actions.py` : aucune règle de sécurité n'est écrite deux fois.
 
+**Comptes.** `synunnel/account.py` porte la double authentification, le mot de passe oublié, la récupération et la vérification d'adresse ; `synunnel/security.py` les primitives (TOTP, chiffrement AES-GCM des secrets, codes de secours) ; `synunnel/mailer.py` l'envoi SMTPS depuis une file d'arrière-plan. Deux versions portées par chaque compte gouvernent ce qui est émis : `session_version` (sessions, accès d'adresses) et `credential_version` (jetons d'API, liens, tickets, challenges, enrôlements), incrémentées à chaque changement de justificatif.
+
 **Pare-feu du tunnel.** `wg0.conf` charge la table nftables `synunnel_wg` (`/etc/synunnel/wg0-firewall.nft`) en `PreUp`, avant la création de l'interface : seuls les paquets de réponse aux connexions ouvertes par le VPS entrent par `wg0`, et rien ne transite d'une machine à l'autre. Si la table ne se charge pas, `wg-quick` n'ouvre pas le tunnel.
 
 ## HTTPS et contrôle d'accès

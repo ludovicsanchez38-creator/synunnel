@@ -7,9 +7,11 @@ Pendant l'essai, le Caddyfile, la base, PowerDNS et WireGuard réels sont modifi
 ne jamais le lancer sur une instance qui sert de vrais utilisateurs.
 """
 
+import base64
 import hashlib
 import json
 import os
+import re
 import secrets
 import sqlite3
 import subprocess
@@ -19,6 +21,7 @@ from pathlib import Path
 
 from argon2 import PasswordHasher
 
+from synunnel import security
 from synunnel.dns import PowerDNS
 
 DOMAIN = "e2e.synunnel.test"
@@ -258,6 +261,65 @@ def main() -> None:
         if spaced != "421":
             raise AssertionError(f"Le filtre des jetons laisse passer un espace insécable (statut {spaced}).")
         print("Jeton Synunnel refusé par une adresse publiée, jamais transmis au service : OK")
+
+        # Double authentification par HTTPS : enrôlement, connexion en deux temps, ticket de l'administrateur.
+        jar, page_out = key_dir / "cookies.txt", key_dir / "page.html"
+        resolve = f"{dashboard_host}:443:{values['PUBLIC_IPV4']}"
+
+        def web(path: str, data: dict | None = None) -> tuple[int, str, str]:
+            args = [*base, "--resolve", resolve, "-c", str(jar), "-b", str(jar), "--output", str(page_out),
+                    "--write-out", "%{http_code} %{redirect_url}"]
+            for field, value in (data or {}).items():
+                args += ["--data-urlencode", f"{field}={value}"]
+            status, _, location = run(*args, f"https://{dashboard_host}{path}", check=False).stdout.partition(" ")
+            return int(status or 0), location, page_out.read_text() if page_out.exists() else ""
+
+        def csrf_of(html: str) -> str:
+            return re.search(r'name="csrf_token" value="([^"]+)"', html).group(1)
+
+        def totp(b32: str, offset: int = 0) -> str:
+            secret = base64.b32decode(b32 + "=" * (-len(b32) % 8))
+            return security.code_at(secret, security.current_step(time.time()) + offset)
+
+        def sign_in() -> tuple[int, str]:
+            _, _, html = web("/login")
+            status, location, _ = web("/login", {"csrf_token": csrf_of(html), "email": EMAIL, "password": password})
+            return status, location
+
+        if sign_in()[0] != 302:
+            raise AssertionError("Connexion par mot de passe refusée.")
+        _, _, html = web("/security")
+        status, _, html = web("/security/2fa/start", {"csrf_token": csrf_of(html), "password": password})
+        secret_b32 = re.search(r'id="totp-secret">([A-Z2-7 ]+)<', html).group(1).replace(" ", "")
+        enrollment = re.search(r'name="enrollment" value="([^"]+)"', html).group(1)
+        status, _, html = web("/security/2fa/confirm", {"csrf_token": csrf_of(html), "enrollment": enrollment,
+                                                        "code": totp(secret_b32)})
+        if status != 200 or len(re.findall(r'class="recovery-code"', html)) != 10:
+            raise AssertionError(f"Activation de la double authentification refusée (statut {status}).")
+        jar.unlink()
+        status, location = sign_in()
+        if status != 302 or not location.endswith("/login/2fa"):
+            raise AssertionError(f"La connexion n'exige pas le second facteur ({status} {location}).")
+        if web("/dashboard")[0] != 302:
+            raise AssertionError("Une session sans second facteur ouvre le tableau de bord.")
+        _, _, html = web("/login/2fa")
+        # Le pas courant a servi à l'activation : le code du pas suivant, dans la fenêtre, est accepté.
+        status, _, _ = web("/login/2fa", {"csrf_token": csrf_of(html), "code": totp(secret_b32, 1)})
+        if status != 302 or web("/dashboard")[0] != 200:
+            raise AssertionError("Connexion en deux temps refusée.")
+        print("Double authentification : enrôlement et connexion en deux temps par HTTPS : OK")
+        ticket = json.loads(run(*base, "--resolve", resolve, "--header", f"Authorization: Bearer {values['ADMIN_TOKEN']}",
+                                "--header", "Content-Type: application/json", "--data",
+                                json.dumps({"email": EMAIL, "scope": "2fa"}),
+                                f"https://{dashboard_host}/admin/api/users/{user_id}/recovery").stdout)["ticket"]
+        jar.unlink()
+        _, _, html = web("/recover")
+        status, _, _ = web("/recover", {"csrf_token": csrf_of(html), "email": EMAIL, "ticket": ticket,
+                                        "password": password})
+        status, location = sign_in()
+        if status != 302 or not location.endswith("/dashboard"):
+            raise AssertionError(f"Le ticket de récupération n'a pas retiré le second facteur ({status} {location}).")
+        print("Ticket de récupération de l'administrateur par HTTPS : OK")
         completed = True
     finally:
         errors: list[str] = []
@@ -301,7 +363,7 @@ def main() -> None:
         if zone_created:
             attempt("zone PowerDNS", lambda: pdns.delete_zone(DOMAIN))
         attempt("synchronisation", lambda: run("/usr/local/sbin/synunnel-sync"))
-        for path in (private_file, page_file):
+        for path in (private_file, page_file, key_dir / "cookies.txt", key_dir / "page.html"):
             attempt(str(path), lambda path=path: path.unlink(missing_ok=True))
         for directory in (key_dir, web_dir):
             attempt(str(directory), directory.rmdir)

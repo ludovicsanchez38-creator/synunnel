@@ -144,3 +144,12 @@ table td:last-child, table th:last-child { text-align: right; }
   .auth-card { margin-top: 24px; justify-self: stretch; max-width: none; }
   .card { margin-bottom: 14px; padding: 20px; }
 }
+
+/* Double authentification : QR code, clé et codes de secours */
+.qr { display: inline-block; padding: 8px; background: #fff; border: 1px solid var(--line); border-radius: 12px; }
+.qr svg { display: block; max-width: 100%; height: auto; }
+#totp-secret { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .04em; word-break: break-all; }
+.recovery-list { list-style: none; padding: 0; margin: 0 0 20px; display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 8px; }
+.recovery-code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; background: var(--muted-bg); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; }
+.card form + form { margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--line); }
+.card h3 { font-size: 1rem; margin: 0 0 4px; }

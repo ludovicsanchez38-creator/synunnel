@@ -13,6 +13,8 @@ https://<tableau de bord>/api/v1/openapi.json
 - Tout jeton peut lire. Chaque écriture exige une permission cochée à la création : `domains` (demandes, preuve TXT, enregistrements), `machines`, `addresses`, `sharing` (listes d'accès des adresses protégées). Aucune case cochée : jeton en lecture seule.
 - Il s'envoie **uniquement** vers l'adresse du tableau de bord, dans l'en-tête `Authorization: Bearer syn_...`, jamais dans une URL. Les adresses publiées refusent toute requête portant un jeton Synunnel (statut 421) : une erreur d'adresse ne le transmet jamais au service qui s'y trouve.
 - Le cookie de session du tableau de bord n'ouvre jamais l'API, et un jeton n'ouvre ni le tableau de bord ni l'API d'administration.
+- Un jeton meurt au premier changement de justificatif de son compte : mot de passe changé ou réinitialisé, double authentification activée, désactivée ou récupérée, suspension. L'API répond alors 401 : recrée un jeton depuis le tableau de bord. Quand la double authentification est active, sa création demande aussi un code.
+- Sur une instance qui exige la double authentification (`REQUIRE_2FA=1`), les jetons d'un compte qui ne l'a pas activée sont refusés avec 403 et le code `mfa_required`.
 
 ## Parcours type
 
@@ -45,7 +47,7 @@ Avant de déléguer le domaine chez le registrar (étape humaine), comparer la z
 ## Règles utiles à un agent
 
 - **Corps JSON strict** : `Content-Type: application/json`, champs connus uniquement, types exacts (un booléen n'est pas une chaîne). Sinon 415 ou 422.
-- **Erreurs** : toujours `{"error": {"code": "...", "message": "..."}}`. Les codes (`unauthorized`, `forbidden`, `not_found`, `conflict`, `unavailable`, `quota`, `invalid`, `proof_missing`, `rate_limited`...) sont stables ; les messages sont en français et peuvent changer.
+- **Erreurs** : toujours `{"error": {"code": "...", "message": "..."}}`. Les codes (`unauthorized`, `forbidden`, `mfa_required`, `not_found`, `conflict`, `unavailable`, `quota`, `invalid`, `proof_missing`, `rate_limited`...) sont stables ; les messages sont en français et peuvent changer.
 - **Supprimer un domaine** : `DELETE /domains/{domain_id}` retire la zone du DNS de l'instance ; il faut d'abord retirer ses adresses, et remettre les serveurs de noms de l'hébergeur chez le registrar avant, sinon le domaine cesse de répondre.
 - **Adresses publiques** : créer une adresse avec `"protected": false` exige aussi la permission `sharing`, car c'est une décision d'accès.
 - **Rejouer sans risque** : une création rejouée avec les mêmes valeurs (demande, vérification, enregistrement, machine, adresse) renvoie 200 et la ressource existante au lieu d'un doublon. Une suppression rejouée renvoie 404.

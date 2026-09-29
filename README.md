@@ -2,7 +2,7 @@
 
 Synunnel publie des services hébergés chez vous (un NAS, une domotique, un petit site) sur votre propre nom de domaine, en HTTPS, sans ouvrir le moindre port sur votre box. Un VPS sert de porte d'entrée : il répond pour votre domaine, obtient les certificats et relaie le trafic vers vos machines par un tunnel WireGuard.
 
-> **Version 0.1 alpha.** Synunnel fonctionne de bout en bout et a été testé sur une installation neuve, mais il reste jeune. Réservez-le pour l'instant à des usages personnels ou à des proches de confiance, lisez les [limites connues](docs/SECURITE.md#limites-connues-de-la-v01-alpha) et gardez une sauvegarde de votre zone DNS actuelle avant toute délégation.
+> **Version 0.2 alpha.** Synunnel fonctionne de bout en bout et a été testé sur une installation neuve, mais il reste jeune. Réservez-le pour l'instant à des usages personnels ou à des proches de confiance, lisez les [limites connues](docs/SECURITE.md#limites-connues-de-la-v02-alpha) et gardez une sauvegarde de votre zone DNS actuelle avant toute délégation.
 
 *In English: Synunnel is a self-hosted alternative to tunnel services. A single VPS runs an authoritative DNS server (PowerDNS), an HTTPS reverse proxy with on-demand certificates (Caddy) and a WireGuard hub; users delegate their own domain to it and expose services from machines behind NAT. Code comments and docs are in French. MIT licensed, alpha quality.*
 
@@ -44,7 +44,17 @@ sudo env PUBLIC_IPV4=203.0.113.10 \
   ./scripts/install.sh
 ```
 
-Paramètres facultatifs : `PUBLIC_IPV6`, `SOA_RNAME` (par défaut `hostmaster.<DASHBOARD_HOST>.`), `REDIRECT_HOSTS` (noms supplémentaires redirigés vers le tableau de bord, séparés par des virgules), `RESERVED_DOMAINS` (domaines que les comptes ne pourront pas revendiquer), et les quotas `MAX_DOMAINS_PER_USER` (20), `MAX_MACHINES_PER_USER` (10), `MAX_ADDRESSES_PER_USER` (50), `MAX_RECORDS_PER_DOMAIN` (200).
+Paramètres facultatifs : `PUBLIC_IPV6`, `SOA_RNAME` (par défaut `hostmaster.<DASHBOARD_HOST>.`), `REDIRECT_HOSTS` (noms supplémentaires redirigés vers le tableau de bord, séparés par des virgules), `RESERVED_DOMAINS` (domaines que les comptes ne pourront pas revendiquer), les quotas `MAX_DOMAINS_PER_USER` (20), `MAX_MACHINES_PER_USER` (10), `MAX_ADDRESSES_PER_USER` (50), `MAX_RECORDS_PER_DOMAIN` (200), et `REQUIRE_2FA=1` pour imposer la double authentification à tous les comptes.
+
+**Envoi de mails** (facultatif : lien de mot de passe oublié, vérification d'adresse, alertes de sécurité). SMTPS sur le port 465 seulement. Déposez d'abord le mot de passe de la boîte d'envoi dans un fichier de root, puis passez les réglages :
+
+```bash
+sudo install -m 0600 /dev/null /etc/synunnel/smtp-password && sudo nano /etc/synunnel/smtp-password
+sudo env SMTP_HOST=smtp.example.org SMTP_USER=noreply@example.org SMTP_FROM=noreply@example.org \
+  SMTP_PASSWORD_FILE=/etc/synunnel/smtp-password ./scripts/install.sh
+```
+
+Le script ne lit jamais ce fichier : il en fixe seulement les droits (root:synunnel, 0640). Publiez SPF, DKIM et DMARC pour le domaine d'envoi chez son hébergeur DNS. Sans ces réglages, le mot de passe oublié passe par un ticket de l'administrateur.
 
 Le dépôt peut vivre ailleurs (le service est généré pour son emplacement réel), mais `/opt/synunnel` évite de modifier les droits d'un répertoire personnel. Le script vérifie les paramètres avant de toucher à la machine, installe les paquets, crée les secrets dans `/etc/synunnel/synunnel.env` (hors du dépôt), configure PowerDNS, Caddy, WireGuard et un pare-feu dédié au tunnel, puis démarre les services. On peut le relancer sans renouveler les secrets : les valeurs déjà enregistrées font foi. Pour changer un réglage ensuite, modifiez `/etc/synunnel/synunnel.env`, puis relancez le script ou `sudo systemctl restart synunnel`.
 
@@ -62,13 +72,15 @@ Les comptes s'ouvrent par invitation (`REGISTRATION_MODE=invitation`, par défau
 
 **Publier une adresse.** Choisissez un nom (`@` pour la racine du domaine), la machine et le port local. Une adresse protégée exige la connexion à Synunnel ; son propriétaire peut ouvrir l'accès à une liste de comptes approuvés.
 
+**Sécuriser son compte.** Page **Sécurité** : double authentification par application de codes (Aegis, 2FAS, Google Authenticator, un gestionnaire de mots de passe…), dix codes de secours, changement de mot de passe et vérification de l'adresse mail, qui permet ensuite de réinitialiser un mot de passe oublié. Activer la double authentification ou changer de mot de passe coupe les autres sessions et révoque les jetons d'API.
+
 ## API pour agents
 
 Un agent IA ou un script peut tout faire sur un compte (domaines, DNS, machines, adresses, partage) avec un jeton créé depuis la page **Jetons d'API** : permissions cochées une à une, 7 ou 30 jours, révocable à tout moment. La clé privée d'une machine reste sur la machine : l'API ne reçoit que la clé publique. Guide et exemples : [docs/API.md](docs/API.md) ; description OpenAPI servie par l'instance sur `/api/v1/openapi.json`.
 
 ## Administration
 
-- [API d'administration](docs/API-ADMIN.md) : comptes en attente, approbation, refus.
+- [API d'administration](docs/API-ADMIN.md) : invitations, comptes en attente, approbation, refus, suspension, tickets de récupération (mot de passe ou double authentification perdus), vérification d'adresse.
 - `scripts/provision-site.py` et `scripts/create-machine-config.py` : rattachement d'un site ou d'une machine à un compte approuvé depuis le VPS, sans passer par le tableau de bord.
 - État des services : `sudo systemctl status pdns caddy wg-quick@wg0 synunnel synunnel-reconcile.timer`.
 - La base fait foi : si PowerDNS, WireGuard ou Caddy n'ont pas pu être mis à jour pendant une action, le rapprochement automatique (toutes les cinq minutes, `journalctl -u synunnel-reconcile`) termine le travail.
