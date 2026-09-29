@@ -396,10 +396,11 @@ install -o root -g root -m 0644 "$REPO_DIR/config/wg0-firewall.nft" /etc/synunne
 install -d -o root -g root -m 0755 /etc/systemd/system/caddy.service.d
 install -o root -g root -m 0644 "$REPO_DIR/config/caddy-synunnel.conf" /etc/systemd/system/caddy.service.d/synunnel.conf
 
-# Caddy validé, unités écrites (elles lancent `python -m gunicorn`, valable avec l'ancien comme avec le
-# nouvel environnement) : la bascule peut avoir lieu, juste avant le rechargement.
-swap_venv "$REPO_DIR"
+# Caddy validé, unités écrites et chargées (elles lancent `python -m gunicorn`, valable avec l'ancien comme
+# avec le nouvel environnement) : la bascule peut avoir lieu, aucune unité chargée ne dépend plus des
+# scripts de console de l'environnement.
 systemctl daemon-reload
+swap_venv "$REPO_DIR"
 # Redémarrage complet : l'API d'administration de Caddy change de place (socket réservé à Caddy),
 # un simple rechargement ne la déplacerait pas.
 systemctl enable caddy

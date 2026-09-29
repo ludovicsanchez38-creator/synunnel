@@ -223,7 +223,9 @@ def test_environment_is_swapped_only_once_caddy_and_units_are_ready():
     units = script.index('> "/etc/systemd/system/$unit"')
     swap = script.index('swap_venv "$REPO_DIR"')
     reload = script.index("systemctl daemon-reload")
-    assert build < validate < units < swap < reload
+    # Unités chargées avant la bascule : un arrêt entre les deux laisse systemd sur `python -m gunicorn`,
+    # jamais sur l'ancien `.venv/bin/gunicorn` face à un environnement dont les scripts pointent ailleurs.
+    assert build < validate < units < reload < swap
     assert 'mv "$VENV_NEW" "$REPO_DIR/.venv"' not in script[:swap]
 
 
