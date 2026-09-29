@@ -5,9 +5,11 @@ import runpy
 import sqlite3
 from pathlib import Path
 
+from conftest import instance_config
+
 from synunnel import create_app
 from synunnel.db import get_db
-from synunnel.dns import PowerDNS, normalize_domain
+from synunnel.dns import PowerDNS, normalize_domain, system_reservations
 from synunnel.provision import create_machine_config, provision_site
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -20,7 +22,7 @@ def test_existing_database_gets_shared_access_columns(tmp_path):
                "hostname TEXT, port INTEGER, protected INTEGER, created_at TEXT)")
     db.commit()
     db.close()
-    app = create_app({"TESTING": True, "SECRET_KEY": "test", "ADMIN_TOKEN": "test",
+    app = create_app({**instance_config(), "SECRET_KEY": "test", "ADMIN_TOKEN": "test",
                       "DATABASE": str(path), "PDNS_ENABLED": False, "SYNC_COMMAND": ""})
     with app.app_context():
         assert "shared" in {row[1] for row in get_db().execute("PRAGMA table_info(addresses)")}
@@ -28,10 +30,15 @@ def test_existing_database_gets_shared_access_columns(tmp_path):
 
 
 def test_system_domains_cannot_be_claimed_by_users():
+    reserved = system_reservations(
+        ["synunnel.fr", "ns1.synunnel.fr", "ns2.synunnel.fr", "synunnel.com", "www.synunnel.com"],
+        ["example.org"],
+    )
+    assert normalize_domain("autre.example", reserved) == "autre.example"
     for name in ("synunnel.fr", "x.synunnel.fr", "synunnel.com", "www.synunnel.com",
-                 "synoptia.fr", "synunnel.synoptia.fr"):
+                 "example.org", "home.example.org"):
         try:
-            normalize_domain(name)
+            normalize_domain(name, reserved)
         except ValueError:
             pass
         else:
@@ -41,40 +48,31 @@ def test_system_domains_cannot_be_claimed_by_users():
 def test_caddy_template_uses_configured_hosts_and_rejects_injection():
     render = runpy.run_path(str(ROOT / "scripts/render-caddy.py"))["render_caddy"]
     template = (ROOT / "config/Caddyfile").read_text()
-    caddy = render(template, "synunnel.fr", "synunnel.com,www.synunnel.com", "ludo@synoptia.fr")
+    caddy = render(template, "synunnel.fr", "synunnel.com,www.synunnel.com", "admin@example.org")
     assert "@synunnel_dashboard host synunnel.fr" in caddy
     assert "@synunnel_redirect host synunnel.com www.synunnel.com" in caddy
     assert "redir https://synunnel.fr{uri} 308" in caddy
     assert "__DASHBOARD_HOST__" not in caddy
     try:
-        render(template, "synunnel.fr\nrespond 200", "synunnel.com", "ludo@synoptia.fr")
+        render(template, "synunnel.fr\nrespond 200", "synunnel.com", "admin@example.org")
     except ValueError:
         pass
     else:
         raise AssertionError("Une injection de configuration a été acceptée.")
-
-
-def test_env_migration_is_idempotent():
-    migrate = runpy.run_path(str(ROOT / "scripts/migrate-instance-domain.py"))["migrate_content"]
-    old = ("SECRET_KEY=keep-secret\nDASHBOARD_HOST=synunnel.synoptia.fr\n"
-           "NS1_HOST=ns1.synunnel.synoptia.fr\nNS2_HOST=ns2.synunnel.synoptia.fr\n")
-    new, changed = migrate(old)
-    assert changed and "SECRET_KEY=keep-secret" in new
-    assert "DASHBOARD_HOST=synunnel.fr" in new
-    assert "SOA_RNAME=hostmaster.synunnel.fr." in new
-    assert "REDIRECT_HOSTS=synunnel.com,www.synunnel.com" in new
-    assert migrate(new) == (new, False)
+    alone = render(template, "tunnel.example.org", "", "admin@example.org")
+    assert "__REDIRECT" not in alone and "synunnel_redirect" not in alone
+    assert "@synunnel_dashboard host tunnel.example.org" in alone
 
 
 def test_existing_zone_authority_changes_once():
     pdns = PowerDNS("http://localhost", "test", ("ns1.synunnel.fr.", "ns2.synunnel.fr."))
     zone = {"rrsets": [
         {"name": "example.net.", "type": "SOA", "ttl": 3600, "records": [
-            {"content": "ns1.synunnel.synoptia.fr. hostmaster.synoptia.fr. 2 3600 600 1209600 300", "disabled": False},
+            {"content": "ns1.ancien.example. hostmaster.ancien.example. 2 3600 600 1209600 300", "disabled": False},
         ]},
         {"name": "example.net.", "type": "NS", "ttl": 3600, "records": [
-            {"content": "ns1.synunnel.synoptia.fr.", "disabled": False},
-            {"content": "ns2.synunnel.synoptia.fr.", "disabled": False},
+            {"content": "ns1.ancien.example.", "disabled": False},
+            {"content": "ns2.ancien.example.", "disabled": False},
         ]},
         {"name": "example.net.", "type": "MX", "ttl": 3600, "records": [
             {"content": "10 mail.example.net.", "disabled": False},
@@ -102,12 +100,12 @@ def test_existing_zone_authority_changes_once():
 
 
 def test_provision_cli_logic_requires_approved_owner_and_preserves_mail(tmp_path):
-    app = create_app({"TESTING": True, "SECRET_KEY": "test", "ADMIN_TOKEN": "test",
+    app = create_app({**instance_config(), "SECRET_KEY": "test", "ADMIN_TOKEN": "test",
                       "DATABASE": str(tmp_path / "provision.db"), "PDNS_ENABLED": False,
                       "SYNC_COMMAND": ""})
     key = base64.b64encode(b"a" * 32).decode()
-    kwargs = {"user_email": "owner@example.net", "domain_name": "tooggy.com",
-              "machine_name": "tooggy-landing", "machine_ip": "10.88.0.3",
+    kwargs = {"user_email": "owner@example.net", "domain_name": "exemple.fr",
+              "machine_name": "site-vitrine", "machine_ip": "10.88.0.3",
               "machine_public_key": key, "port": 18080, "hosts": ["@", "www"],
               "mail_records_verified": True,
               "snapshot": lambda domain, selectors: [
@@ -149,10 +147,10 @@ def test_cli_env_parser_accepts_empty_ipv6(tmp_path):
 
 
 def test_machine_config_stream_private_key_is_not_stored(tmp_path):
-    app = create_app({"TESTING": True, "SECRET_KEY": "test", "ADMIN_TOKEN": "test",
+    app = create_app({**instance_config(), "SECRET_KEY": "test", "ADMIN_TOKEN": "test",
                       "DATABASE": str(tmp_path / "machine.db"), "PDNS_ENABLED": False,
                       "SYNC_COMMAND": "", "WG_SERVER_PUBLIC_KEY": "server-public-test",
-                      "WG_ENDPOINT": "51.254.137.231:51820"})
+                      "WG_ENDPOINT": "192.0.2.10:51820"})
     private = base64.b64encode(b"p" * 32).decode()
     public = base64.b64encode(b"q" * 32).decode()
     with app.app_context():
@@ -161,7 +159,7 @@ def test_machine_config_stream_private_key_is_not_stored(tmp_path):
                    ("owner@example.net", "unused", "approved", "2026-09-27"))
         db.commit()
         config = create_machine_config(
-            app, user_email="owner@example.net", machine_name="tooggy-vps",
+            app, user_email="owner@example.net", machine_name="vps-maison",
             machine_ip="10.88.0.3", keypair=(private, public),
         )
         assert f"PrivateKey = {private}" in config

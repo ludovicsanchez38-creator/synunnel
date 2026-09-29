@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+{% block title %}Vérifier {{ claim.name }}{% endblock %}
+{% block content %}
+<section class="page-head"><a class="back" href="{{ url_for('dashboard') }}">← Tableau de bord</a><span class="eyebrow">Preuve de propriété</span><h1>{{ claim.name }}</h1><p>Avant de créer la zone, Synunnel vérifie que ce domaine vous appartient. Ajoutez l'enregistrement ci-dessous chez votre hébergeur DNS actuel, sans rien changer d'autre.</p></section>
+<div class="list-grid">
+  <section class="card"><h2>Enregistrement à ajouter</h2>
+    <p>Type</p><div class="code-line">TXT</div>
+    <p>Nom</p><div class="code-line">{{ label }}</div>
+    <p>Valeur</p><div class="code-line">{{ value }}</div>
+    <p class="small">Selon votre hébergeur, le nom se saisit en entier ou seulement sous la forme « _synunnel ». Vous pourrez supprimer cet enregistrement une fois le domaine vérifié.</p>
+  </section>
+  <section class="card"><h2>Lancer la vérification</h2>
+    <p>La vérification interroge directement les serveurs DNS de votre domaine. Si vous venez d'ajouter l'enregistrement, quelques minutes peuvent être nécessaires.</p>
+    <p class="small">Tant que la vérification n'a pas réussi, aucune zone n'est créée et le nom reste ouvert à son véritable propriétaire.</p>
+    <form method="post" action="{{ url_for('verify_claim', claim_id=claim.id) }}"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="button" type="submit">Vérifier et créer la zone</button></form>
+    <form class="inline" method="post" action="{{ url_for('delete_claim', claim_id=claim.id) }}"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="quiet" type="submit">Annuler cette demande</button></form>
+  </section>
+</div>
+{% endblock %}

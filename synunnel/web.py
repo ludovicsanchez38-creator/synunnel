@@ -28,20 +28,28 @@ from flask import (
 )
 from werkzeug.middleware.proxy_fix import ProxyFix
 
+from . import VERSION_LABEL
 from .db import close_db, get_db, init_db, now_iso
 from .dns import (
+    VERIFY_LABEL,
     PowerDNS,
     canonical_content,
     delegation_status,
     fqdn,
     normalize_domain,
+    ownership_proof,
     relative_name,
     snapshot_records,
+    system_reservations,
 )
+from .provision import generate_keypair
 
 PASSWORDS = PasswordHasher()
 EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 ACCESS_COOKIE = "__Host-synunnel-access"
+# Vérifié quand le compte n'existe pas : même coût qu'une vraie tentative.
+DUMMY_HASH = PASSWORDS.hash(secrets.token_hex(16))
+REQUIRED_SETTINGS = ("PUBLIC_IPV4", "WG_ENDPOINT", "DASHBOARD_HOST", "NS1_HOST", "NS2_HOST")
 
 
 def _hash_token(value: str) -> str:
@@ -176,14 +184,17 @@ def create_app(config_override: dict | None = None) -> Flask:
         PDNS_API_KEY=os.getenv("PDNS_API_KEY"),
         PDNS_API_URL=os.getenv("PDNS_API_URL", "http://127.0.0.1:8081/api/v1/servers/localhost"),
         DATABASE=os.getenv("DATABASE", "/var/lib/synunnel/synunnel.db"),
-        PUBLIC_IPV4=os.getenv("PUBLIC_IPV4", "51.254.137.231"),
-        PUBLIC_IPV6=os.getenv("PUBLIC_IPV6", "2001:41d0:305:2100::f36e"),
-        WG_ENDPOINT=os.getenv("WG_ENDPOINT", "51.254.137.231:51820"),
+        PUBLIC_IPV4=os.getenv("PUBLIC_IPV4", ""),
+        PUBLIC_IPV6=os.getenv("PUBLIC_IPV6", ""),
+        WG_ENDPOINT=os.getenv("WG_ENDPOINT", ""),
         WG_SERVER_PUBLIC_KEY=os.getenv("WG_SERVER_PUBLIC_KEY", ""),
-        DASHBOARD_HOST=os.getenv("DASHBOARD_HOST", "synunnel.fr"),
-        NS1_HOST=os.getenv("NS1_HOST", "ns1.synunnel.fr"),
-        NS2_HOST=os.getenv("NS2_HOST", "ns2.synunnel.fr"),
-        REDIRECT_HOSTS=os.getenv("REDIRECT_HOSTS", "synunnel.com,www.synunnel.com"),
+        DASHBOARD_HOST=os.getenv("DASHBOARD_HOST", ""),
+        NS1_HOST=os.getenv("NS1_HOST", ""),
+        NS2_HOST=os.getenv("NS2_HOST", ""),
+        REDIRECT_HOSTS=os.getenv("REDIRECT_HOSTS", ""),
+        EXTRA_RESERVED_DOMAINS=os.getenv("RESERVED_DOMAINS", ""),
+        MAX_DOMAINS_PER_USER=int(os.getenv("MAX_DOMAINS_PER_USER", "20")),
+        MAX_MACHINES_PER_USER=int(os.getenv("MAX_MACHINES_PER_USER", "10")),
         SYNC_COMMAND=os.getenv("SYNC_COMMAND", "/usr/bin/sudo -n /usr/local/sbin/synunnel-sync"),
         PDNS_ENABLED=True,
         SESSION_COOKIE_NAME="__Host-synunnel",
@@ -197,6 +208,14 @@ def create_app(config_override: dict | None = None) -> Flask:
         app.config.update(config_override)
     if not app.config["SECRET_KEY"] or not app.config["ADMIN_TOKEN"]:
         raise RuntimeError("SECRET_KEY et ADMIN_TOKEN doivent être configurés hors du dépôt.")
+    missing = [name for name in REQUIRED_SETTINGS if not app.config[name]]
+    if missing:
+        raise RuntimeError(f"Réglages de l'instance manquants : {', '.join(missing)}.")
+    app.config["RESERVED_DOMAINS"] = system_reservations(
+        [app.config["DASHBOARD_HOST"], app.config["NS1_HOST"], app.config["NS2_HOST"],
+         *app.config["REDIRECT_HOSTS"].split(",")],
+        app.config["EXTRA_RESERVED_DOMAINS"].split(","),
+    )
     app.wsgi_app = ProxyFix(app.wsgi_app, x_proto=1, x_host=1)
     app.teardown_appcontext(close_db)
     with app.app_context():
@@ -222,7 +241,7 @@ def create_app(config_override: dict | None = None) -> Flask:
     def context():
         if "csrf" not in session:
             session["csrf"] = secrets.token_urlsafe(32)
-        return {"csrf_token": session["csrf"], "current_user": g.get("user")}
+        return {"csrf_token": session["csrf"], "current_user": g.get("user"), "app_version": VERSION_LABEL}
 
     @app.after_request
     def security_headers(response):
@@ -261,19 +280,19 @@ def create_app(config_override: dict | None = None) -> Flask:
             flash("Adresse mail invalide ou mot de passe de moins de 12 caractères.", "error")
             return render_template("register.html"), 400
         db = get_db()
-        if db.execute("SELECT 1 FROM blocked_emails WHERE email=?", (email,)).fetchone():
-            flash("Cette adresse ne peut pas être inscrite.", "error")
-            return render_template("register.html"), 403
-        try:
-            with db:
-                db.execute(
-                    "INSERT INTO users(email,password_hash,status,created_at) VALUES(?,?,'pending',?)",
-                    (email, PASSWORDS.hash(password), now_iso()),
-                )
-        except sqlite3.IntegrityError:
-            flash("Cette adresse est déjà inscrite.", "error")
-            return render_template("register.html"), 409
-        flash("Compte créé. Il reste en attente de validation par l'administrateur.", "success")
+        # Réponse identique pour une adresse nouvelle, déjà inscrite ou bloquée :
+        # la page ne doit pas révéler qui possède un compte.
+        password_hash = PASSWORDS.hash(password)
+        if not db.execute("SELECT 1 FROM blocked_emails WHERE email=?", (email,)).fetchone():
+            try:
+                with db:
+                    db.execute(
+                        "INSERT INTO users(email,password_hash,status,created_at) VALUES(?,?,'pending',?)",
+                        (email, password_hash, now_iso()),
+                    )
+            except sqlite3.IntegrityError:
+                pass
+        flash("Demande enregistrée. Le compte sera utilisable après validation par l'administrateur.", "success")
         return redirect(url_for("login"))
 
     @app.route("/login", methods=["GET", "POST"])
@@ -288,7 +307,8 @@ def create_app(config_override: dict | None = None) -> Flask:
         _rate_limit("login_email", email, 10, 900)
         row = get_db().execute("SELECT * FROM users WHERE email=?", (email,)).fetchone()
         try:
-            valid = row is not None and PASSWORDS.verify(row["password_hash"], request.form.get("password", ""))
+            valid = PASSWORDS.verify(row["password_hash"] if row else DUMMY_HASH, request.form.get("password", ""))
+            valid = valid and row is not None
         except VerifyMismatchError:
             valid = False
         if not valid:
@@ -305,6 +325,11 @@ def create_app(config_override: dict | None = None) -> Flask:
 
     @app.post("/logout")
     def logout():
+        if g.user:
+            # Se déconnecter ferme aussi les accès ouverts sur les adresses protégées.
+            with get_db() as db:
+                db.execute("DELETE FROM host_sessions WHERE user_id=?", (g.user["id"],))
+                db.execute("DELETE FROM access_codes WHERE user_id=?", (g.user["id"],))
         session.clear()
         return redirect(url_for("login"))
 
@@ -313,6 +338,9 @@ def create_app(config_override: dict | None = None) -> Flask:
     def dashboard():
         db = get_db()
         domains = db.execute("SELECT * FROM domains WHERE user_id=? ORDER BY name", (g.user["id"],)).fetchall()
+        claims = db.execute(
+            "SELECT * FROM domain_claims WHERE user_id=? ORDER BY name", (g.user["id"],),
+        ).fetchall()
         machines = db.execute("SELECT * FROM machines WHERE user_id=? ORDER BY name", (g.user["id"],)).fetchall()
         addresses = db.execute(
             "SELECT a.*, d.name AS domain_name, m.name AS machine_name, "
@@ -321,39 +349,97 @@ def create_app(config_override: dict | None = None) -> Flask:
             "JOIN domains d ON d.id=a.domain_id JOIN machines m ON m.id=a.machine_id "
             "WHERE d.user_id=? ORDER BY a.hostname", (g.user["id"],),
         ).fetchall()
-        return render_template("dashboard.html", domains=domains, machines=machines, addresses=addresses)
+        return render_template("dashboard.html", domains=domains, claims=claims, machines=machines,
+                               addresses=addresses)
 
     @app.post("/domains")
     @_login_required
     def add_domain():
+        db = get_db()
         try:
-            domain = normalize_domain(request.form.get("domain", ""))
+            domain = normalize_domain(request.form.get("domain", ""), app.config["RESERVED_DOMAINS"])
             raw_selectors = request.form.get("selectors", "").replace(";", ",")
             selectors = [relative_name(item.strip()) for item in raw_selectors.split(",") if item.strip()]
             if len(selectors) > 20 or any("." in item or item == "@" for item in selectors):
                 raise ValueError("Au maximum 20 sélecteurs DKIM simples.")
             if not request.form.get("mail_checked"):
                 raise ValueError("Confirme la vérification des enregistrements mail et des sélecteurs DKIM.")
-            if get_db().execute("SELECT 1 FROM domains WHERE name=?", (domain,)).fetchone():
+            if db.execute("SELECT 1 FROM domains WHERE name=?", (domain,)).fetchone():
                 raise ValueError("Ce domaine est déjà enregistré.")
+            owned = db.execute("SELECT COUNT(*) FROM domains WHERE user_id=?", (g.user["id"],)).fetchone()[0]
+            pending = db.execute("SELECT COUNT(*) FROM domain_claims WHERE user_id=?", (g.user["id"],)).fetchone()[0]
+            if owned + pending >= app.config["MAX_DOMAINS_PER_USER"]:
+                raise ValueError("Nombre maximal de domaines atteint pour ce compte.")
+            with db:
+                db.execute(
+                    "INSERT INTO domain_claims(user_id,name,token,selectors,created_at) VALUES(?,?,?,?,?) "
+                    "ON CONFLICT(user_id,name) DO UPDATE SET selectors=excluded.selectors",
+                    (g.user["id"], domain, secrets.token_urlsafe(24), ",".join(selectors), now_iso()),
+                )
+            claim_id = db.execute(
+                "SELECT id FROM domain_claims WHERE user_id=? AND name=?", (g.user["id"], domain),
+            ).fetchone()[0]
+        except (ValueError, sqlite3.IntegrityError) as exc:
+            flash(str(exc), "error")
+            return redirect(url_for("dashboard"))
+        return redirect(url_for("claim_detail", claim_id=claim_id))
+
+    def _owned_claim(claim_id: int):
+        row = get_db().execute(
+            "SELECT * FROM domain_claims WHERE id=? AND user_id=?", (claim_id, g.user["id"]),
+        ).fetchone()
+        if row is None:
+            abort(404)
+        return row
+
+    @app.get("/claims/<int:claim_id>")
+    @_login_required
+    def claim_detail(claim_id: int):
+        claim = _owned_claim(claim_id)
+        return render_template("claim.html", claim=claim, label=f"{VERIFY_LABEL}.{claim['name']}",
+                               value=f"synunnel-verification={claim['token']}")
+
+    @app.post("/claims/<int:claim_id>/delete")
+    @_login_required
+    def delete_claim(claim_id: int):
+        _owned_claim(claim_id)
+        with get_db() as db:
+            db.execute("DELETE FROM domain_claims WHERE id=? AND user_id=?", (claim_id, g.user["id"]))
+        flash("Demande annulée.", "success")
+        return redirect(url_for("dashboard"))
+
+    @app.post("/claims/<int:claim_id>/verify")
+    @_login_required
+    def verify_claim(claim_id: int):
+        claim = _owned_claim(claim_id)
+        _rate_limit("verify", str(g.user["id"]), 20, 3600)
+        domain = claim["name"]
+        db = get_db()
+        try:
+            if db.execute("SELECT 1 FROM domains WHERE name=?", (domain,)).fetchone():
+                raise ValueError("Ce domaine a déjà été vérifié par un autre compte.")
+            if f"synunnel-verification={claim['token']}" not in ownership_proof(domain):
+                raise ValueError("Enregistrement de vérification introuvable. S'il vient d'être ajouté, "
+                                 "réessaie dans quelques minutes.")
+            selectors = [item for item in claim["selectors"].split(",") if item]
             snapshot = snapshot_records(domain, selectors)
             if not snapshot:
                 raise ValueError("Aucun enregistrement public trouvé ; la copie DNS serait vide.")
-            db = get_db()
             pdns = _pdns(app) if app.config["PDNS_ENABLED"] else None
             if pdns:
                 pdns.create_zone(domain)
             try:
                 with db:
-                    cursor = db.execute(
+                    domain_id = db.execute(
                         "INSERT INTO domains(user_id,name,created_at) VALUES(?,?,?)",
                         (g.user["id"], domain, now_iso()),
-                    )
-                    domain_id = cursor.lastrowid
+                    ).lastrowid
                     db.executemany(
                         "INSERT INTO records(domain_id,name,type,content,ttl) VALUES(?,?,?,?,?)",
                         [(domain_id, *record) for record in snapshot],
                     )
+                    # La preuve est faite : les demandes concurrentes sur ce nom tombent.
+                    db.execute("DELETE FROM domain_claims WHERE name=?", (domain,))
                     if pdns:
                         pdns.sync_zone(db, domain_id, domain, app.config["PUBLIC_IPV4"], app.config["PUBLIC_IPV6"])
             except Exception:
@@ -362,8 +448,9 @@ def create_app(config_override: dict | None = None) -> Flask:
                 raise
         except (ValueError, sqlite3.IntegrityError) as exc:
             flash(str(exc), "error")
-            return redirect(url_for("dashboard"))
-        flash(f"Zone {domain} créée avec {len(snapshot)} enregistrements repris. Vérifie-la avant délégation.", "success")
+            return redirect(url_for("claim_detail", claim_id=claim_id))
+        flash(f"Domaine vérifié. Zone {domain} créée avec {len(snapshot)} enregistrements repris. "
+              "Vérifie-la avant délégation.", "success")
         return redirect(url_for("domain_detail", domain_id=domain_id))
 
     @app.get("/domains/<int:domain_id>")
@@ -430,11 +517,12 @@ def create_app(config_override: dict | None = None) -> Flask:
         if not 1 <= len(name) <= 80:
             flash("Nom de machine invalide.", "error")
             return redirect(url_for("dashboard"))
-        private_key = subprocess.run(["wg", "genkey"], check=True, capture_output=True, text=True).stdout.strip()
-        public_key = subprocess.run(
-            ["wg", "pubkey"], input=private_key + "\n", check=True, capture_output=True, text=True,
-        ).stdout.strip()
         db = get_db()
+        owned = db.execute("SELECT COUNT(*) FROM machines WHERE user_id=?", (g.user["id"],)).fetchone()[0]
+        if owned >= app.config["MAX_MACHINES_PER_USER"]:
+            flash("Nombre maximal de machines atteint pour ce compte.", "error")
+            return redirect(url_for("dashboard"))
+        private_key, public_key = generate_keypair()
         used = {row[0] for row in db.execute("SELECT ip FROM machines")}
         ip = next((f"10.88.0.{n}" for n in range(2, 255) if f"10.88.0.{n}" not in used), None)
         if ip is None:

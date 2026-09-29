@@ -24,6 +24,15 @@ CREATE TABLE IF NOT EXISTS domains (
     name TEXT NOT NULL UNIQUE,
     created_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS domain_claims (
+    id INTEGER PRIMARY KEY,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    token TEXT NOT NULL,
+    selectors TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    UNIQUE(user_id, name)
+);
 CREATE TABLE IF NOT EXISTS records (
     id INTEGER PRIMARY KEY,
     domain_id INTEGER NOT NULL REFERENCES domains(id) ON DELETE CASCADE,

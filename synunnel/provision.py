@@ -13,6 +13,14 @@ from .db import get_db, now_iso
 from .dns import PowerDNS, fqdn, normalize_domain, relative_name, snapshot_records
 
 
+def generate_keypair() -> tuple[str, str]:
+    """Paire WireGuard (privée, publique) générée par l'outil officiel."""
+    private = subprocess.run(["wg", "genkey"], check=True, capture_output=True, text=True).stdout.strip()
+    public = subprocess.run(["wg", "pubkey"], input=private + "\n", check=True,
+                            capture_output=True, text=True).stdout.strip()
+    return private, public
+
+
 def provision_site(
     app: Flask, *, user_email: str, domain_name: str, machine_name: str, machine_ip: str,
     machine_public_key: str | None, port: int, hosts: list[str], mail_records_verified: bool,
@@ -20,7 +28,7 @@ def provision_site(
 ) -> dict[str, int]:
     if not mail_records_verified:
         raise ValueError("Vérifie les enregistrements mail publics avant le rattachement.")
-    domain_name = normalize_domain(domain_name)
+    domain_name = normalize_domain(domain_name, app.config.get("RESERVED_DOMAINS", ()))
     hosts = [relative_name(host, host_only=True) for host in hosts]
     if not hosts or len(set(hosts)) != len(hosts):
         raise ValueError("Il faut au moins un nom d'hôte distinct.")
@@ -144,9 +152,7 @@ def create_machine_config(
                   (str(ip), user["id"], machine_name)).fetchone():
         raise ValueError("Machine ou IP déjà utilisée.")
     if keypair is None:
-        private = subprocess.run(["wg", "genkey"], check=True, capture_output=True, text=True).stdout.strip()
-        public = subprocess.run(["wg", "pubkey"], input=private + "\n", check=True,
-                                capture_output=True, text=True).stdout.strip()
+        private, public = generate_keypair()
     else:
         private, public = keypair
     if not _valid_key(private) or not _valid_key(public):

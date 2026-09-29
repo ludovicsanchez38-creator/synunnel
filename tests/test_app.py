@@ -1,26 +1,36 @@
 """Tests du parcours d'autorisation et des frontières entre comptes."""
 
+import base64
 import re
 from pathlib import Path
 from urllib.parse import urlsplit
 
 import pytest
+from conftest import instance_config
 
 from synunnel import create_app
 from synunnel.db import get_db
 
+PROOFS: dict[str, set[str]] = {}
+
 
 @pytest.fixture
 def app(tmp_path, monkeypatch):
-    app = create_app({
-        "TESTING": True,
-        "SECRET_KEY": "test-secret-only",
-        "ADMIN_TOKEN": "test-admin-token-only",
-        "DATABASE": str(tmp_path / "synunnel.db"),
-        "PDNS_ENABLED": False,
-        "SYNC_COMMAND": "",
-        "WG_SERVER_PUBLIC_KEY": "test-server-public-key",
-    })
+    app = create_app(instance_config(
+        SECRET_KEY="test-secret-only",
+        ADMIN_TOKEN="test-admin-token-only",
+        DATABASE=str(tmp_path / "synunnel.db"),
+        WG_SERVER_PUBLIC_KEY="test-server-public-key",
+    ))
+    PROOFS.clear()
+    monkeypatch.setattr("synunnel.web.ownership_proof", lambda domain: PROOFS.get(domain, set()))
+    counter = iter(range(1, 250))
+
+    def keypair():
+        n = next(counter)
+        return (base64.b64encode(bytes([n]) * 32).decode(), base64.b64encode(bytes([n, 255]) * 16).decode())
+
+    monkeypatch.setattr("synunnel.web.generate_keypair", keypair)
     monkeypatch.setattr(
         "synunnel.web.snapshot_records",
         lambda domain, selectors: [("@", "MX", f"10 mail.{domain}.", 3600), ("@", "TXT", '"v=spf1 -all"', 3600)],
@@ -63,11 +73,23 @@ def login_dashboard(client, email: str) -> None:
     assert response.status_code == 302
 
 
-def add_domain(client, name: str) -> int:
+def claim_domain(client, name: str) -> tuple[int, str]:
     response = client.post("/domains", data={
         "csrf_token": csrf(client), "domain": name, "mail_checked": "1", "selectors": "",
     })
     assert response.status_code == 302
+    assert "/claims/" in response.headers["Location"]
+    claim_id = int(response.headers["Location"].split("/")[-1])
+    page = client.get(f"/claims/{claim_id}").data.decode()
+    return claim_id, re.search(r"synunnel-verification=[A-Za-z0-9_-]+", page).group(0)
+
+
+def add_domain(client, name: str) -> int:
+    claim_id, proof = claim_domain(client, name)
+    PROOFS.setdefault(name, set()).add(proof)
+    response = client.post(f"/claims/{claim_id}/verify", data={"csrf_token": csrf(client)})
+    assert response.status_code == 302
+    assert "/domains/" in response.headers["Location"]
     return int(response.headers["Location"].split("/")[-1])
 
 
@@ -80,7 +102,8 @@ def test_admin_pending_reject_blocks_email_and_audits(app):
     assert len(pending) == 1
     user_id = pending[0]["id"]
     assert client.post(f"/admin/api/users/{user_id}/reject", headers={"Authorization": "Bearer test-admin-token-only"}).json["email_blocked"]
-    assert client.post("/register", data={"csrf_token": token, "email": "refuse@example.net", "password": "long-secret-123"}).status_code == 403
+    # Même réponse qu'une inscription normale, mais aucun compte n'est recréé.
+    assert client.post("/register", data={"csrf_token": token, "email": "refuse@example.net", "password": "long-secret-123"}).status_code == 302
     with app.app_context():
         assert get_db().execute("SELECT COUNT(*) FROM users").fetchone()[0] == 0
         assert get_db().execute("SELECT COUNT(*) FROM admin_audit").fetchone()[0] == 3
@@ -286,3 +309,64 @@ def test_apex_address_keeps_copied_mail_records(app):
         db = get_db()
         assert db.execute("SELECT hostname FROM addresses WHERE domain_id=?", (domain_id,)).fetchone()[0] == "apex.example.net"
         assert db.execute("SELECT COUNT(*) FROM records WHERE domain_id=? AND type='MX'", (domain_id,)).fetchone()[0] == 1
+
+
+def test_domain_needs_txt_proof_and_cannot_be_squatted(app):
+    owner = app.test_client()
+    squatter = app.test_client()
+    register_approve_login(app, owner, "owner@example.net")
+    register_approve_login(app, squatter, "squatter@example.net")
+    squat_claim, squat_proof = claim_domain(squatter, "victime.example")
+    # Sans l'enregistrement TXT dans le DNS du domaine, aucune zone n'est créée.
+    response = squatter.post(f"/claims/{squat_claim}/verify", data={"csrf_token": csrf(squatter)})
+    assert "/claims/" in response.headers["Location"]
+    with app.app_context():
+        assert get_db().execute("SELECT COUNT(*) FROM domains").fetchone()[0] == 0
+    # La preuve d'un autre compte ne vaut rien pour le squatteur.
+    owner_claim, owner_proof = claim_domain(owner, "victime.example")
+    assert owner_proof != squat_proof
+    PROOFS["victime.example"] = {owner_proof}
+    squatter.post(f"/claims/{squat_claim}/verify", data={"csrf_token": csrf(squatter)})
+    with app.app_context():
+        assert get_db().execute("SELECT COUNT(*) FROM domains").fetchone()[0] == 0
+    assert squatter.get(f"/claims/{owner_claim}").status_code == 404
+    response = owner.post(f"/claims/{owner_claim}/verify", data={"csrf_token": csrf(owner)})
+    assert "/domains/" in response.headers["Location"]
+    with app.app_context():
+        db = get_db()
+        assert db.execute("SELECT u.email FROM domains d JOIN users u ON u.id=d.user_id").fetchone()[0] == "owner@example.net"
+        assert db.execute("SELECT COUNT(*) FROM domain_claims").fetchone()[0] == 0
+
+
+def test_instance_domains_are_reserved(app):
+    client = app.test_client()
+    register_approve_login(app, client, "reserve@example.net")
+    for name in ("synunnel.fr", "x.synunnel.fr", "www.synunnel.com"):
+        response = client.post("/domains", data={
+            "csrf_token": csrf(client), "domain": name, "mail_checked": "1", "selectors": "",
+        })
+        assert response.headers["Location"].endswith("/dashboard")
+    with app.app_context():
+        assert get_db().execute("SELECT COUNT(*) FROM domain_claims").fetchone()[0] == 0
+
+
+def test_register_does_not_reveal_existing_accounts(app):
+    client = app.test_client()
+    data = {"csrf_token": csrf(client), "email": "deja@example.net", "password": "long-secret-123"}
+    first = client.post("/register", data=data)
+    second = client.post("/register", data=data)
+    assert first.status_code == second.status_code == 302
+    assert first.headers["Location"] == second.headers["Location"]
+
+
+def test_logout_closes_protected_address_sessions(app):
+    client = app.test_client()
+    user_id = register_approve_login(app, client, "sortie@example.net")
+    with app.app_context():
+        db = get_db()
+        db.execute("INSERT INTO host_sessions(token_hash,user_id,hostname,expires_at) VALUES(?,?,?,?)",
+                   ("x" * 64, user_id, "nas.example.net", 4102444800))
+        db.commit()
+    assert client.post("/logout", data={"csrf_token": csrf(client)}).status_code == 302
+    with app.app_context():
+        assert get_db().execute("SELECT COUNT(*) FROM host_sessions").fetchone()[0] == 0

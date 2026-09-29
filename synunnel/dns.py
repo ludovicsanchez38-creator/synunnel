@@ -11,6 +11,7 @@ import dns.flags
 import dns.message
 import dns.name
 import dns.query
+import dns.rcode
 import dns.rdata
 import dns.rdataclass
 import dns.rdatatype
@@ -24,13 +25,24 @@ RECORD_LABEL_RE = re.compile(r"^_?[a-z0-9](?:[a-z0-9_-]{0,61}[a-z0-9])?$")
 
 
 def configured_nameservers() -> tuple[str, str]:
-    return (
-        os.getenv("NS1_HOST", "ns1.synunnel.fr").rstrip(".").lower() + ".",
-        os.getenv("NS2_HOST", "ns2.synunnel.fr").rstrip(".").lower() + ".",
-    )
+    ns1, ns2 = os.getenv("NS1_HOST", ""), os.getenv("NS2_HOST", "")
+    if not ns1 or not ns2:
+        raise RuntimeError("NS1_HOST et NS2_HOST doivent être configurés.")
+    return ns1.rstrip(".").lower() + ".", ns2.rstrip(".").lower() + "."
 
 
-def normalize_domain(value: str) -> str:
+def system_reservations(hosts: list[str], extra: list[str] | None = None) -> tuple[str, ...]:
+    """Noms que les comptes ne peuvent pas revendiquer : hôtes de l'instance et leurs domaines parents."""
+    reserved: set[str] = set()
+    for host in [*hosts, *(extra or [])]:
+        labels = host.strip().rstrip(".").lower().split(".")
+        if len(labels) < 2 or not all(labels):
+            continue
+        reserved.update(".".join(labels[i:]) for i in range(len(labels) - 1))
+    return tuple(sorted(reserved))
+
+
+def normalize_domain(value: str, reserved: tuple[str, ...] = ()) -> str:
     value = value.strip().rstrip(".").lower()
     try:
         result = value.encode("idna").decode("ascii")
@@ -39,9 +51,8 @@ def normalize_domain(value: str) -> str:
     labels = result.split(".")
     if len(labels) < 2 or len(result) > 253 or any(not LABEL_RE.fullmatch(x) for x in labels):
         raise ValueError("Nom de domaine invalide.")
-    if any(result == reserved or result.endswith(f".{reserved}")
-           for reserved in ("synoptia.fr", "synunnel.fr", "synunnel.com")):
-        raise ValueError("Ce domaine système est réservé.")
+    if any(result == name or result.endswith(f".{name}") for name in reserved):
+        raise ValueError("Ce domaine est réservé par l'instance.")
     return result
 
 
@@ -57,7 +68,10 @@ def relative_name(value: str, *, host_only: bool = False) -> str:
 
 
 def fqdn(name: str, domain: str) -> str:
-    return f"{domain}." if name == "@" else f"{name}.{domain}."
+    full = f"{domain}." if name == "@" else f"{name}.{domain}."
+    if len(full) > 254:
+        raise ValueError("Nom complet trop long (253 caractères au maximum).")
+    return full
 
 
 def canonical_content(kind: str, content: str) -> str:
@@ -145,6 +159,46 @@ def delegation_status(domain: str, nameservers: tuple[str, str] | None = None) -
         return None, []
     expected = set(nameservers or configured_nameservers())
     return expected <= seen, sorted(seen)
+
+
+VERIFY_LABEL = "_synunnel"
+
+
+def ownership_proof(domain: str) -> set[str]:
+    """Lit les TXT _synunnel.<domaine> directement chez les serveurs qui font autorité.
+
+    On contourne les caches pour qu'un enregistrement ajouté il y a une minute soit vu.
+    """
+    target = dns.name.from_text(f"{VERIFY_LABEL}.{domain}.")
+    resolver = dns.resolver.Resolver(configure=True)
+    resolver.timeout = 2
+    resolver.lifetime = 5
+    try:
+        zone = dns.resolver.zone_for_name(dns.name.from_text(f"{domain}."), resolver=resolver, lifetime=5)
+        servers = [item.target.to_text() for item in resolver.resolve(zone, "NS")]
+    except dns.exception.DNSException as exc:
+        raise ValueError("Impossible de trouver les serveurs DNS actuels du domaine.") from exc
+    addresses: list[str] = []
+    for server in servers[:4]:
+        for kind in ("A", "AAAA"):
+            try:
+                addresses.extend(item.to_text() for item in resolver.resolve(server, kind))
+            except dns.exception.DNSException:
+                continue
+    for address in addresses[:8]:
+        try:
+            response = dns.query.udp(dns.message.make_query(target, "TXT"), address, timeout=3)
+        except (dns.exception.DNSException, OSError):
+            continue
+        if response.rcode() not in (dns.rcode.NOERROR, dns.rcode.NXDOMAIN):
+            continue
+        return {
+            b"".join(item.strings).decode("utf-8", "replace")
+            for rrset in response.answer
+            if rrset.rdtype == dns.rdatatype.TXT and rrset.name == target
+            for item in rrset
+        }
+    raise ValueError("Aucun serveur DNS du domaine n'a répondu ; réessaie dans quelques minutes.")
 
 
 class PowerDNS:

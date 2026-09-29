@@ -1,25 +1,25 @@
 {% extends "base.html" %}
 {% block title %}Tableau de bord{% endblock %}
 {% block content %}
-<section class="page-head"><span class="eyebrow">TABLEAU DE BORD</span><h1>Votre espace Synunnel</h1><p>Préparez d'abord votre zone DNS, connectez une machine, puis publiez une adresse.</p></section>
+<section class="page-head"><span class="eyebrow">Tableau de bord</span><h1>Votre espace</h1><p>Préparez d'abord votre zone DNS, connectez une machine, puis publiez une adresse.</p></section>
 <div class="step-grid">
-  <section class="card"><div class="step">01 / DOMAINE</div><h2>Ajouter un domaine</h2><p>Nous recopions les enregistrements publics avant toute délégation. Vérifiez les sélecteurs DKIM de vos fournisseurs de mail.</p>
+  <section class="card"><div class="step">Étape 1 · Domaine</div><h2>Ajouter un domaine</h2><p>Une preuve de propriété par enregistrement TXT, puis la copie de vos enregistrements publics avant toute délégation.</p>
     <form method="post" action="{{ url_for('add_domain') }}">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <label>Nom de domaine<input name="domain" placeholder="mondomaine.fr" required></label>
       <label>Sélecteurs DKIM supplémentaires <span class="hint">séparés par des virgules</span><input name="selectors" placeholder="selector3, monfournisseur"></label>
       <label class="check"><input type="checkbox" name="mail_checked" value="1" required><span>J'ai recensé les sélecteurs DKIM utilisés par ma messagerie et je vérifierai les enregistrements copiés avant de changer les serveurs DNS.</span></label>
-      <button class="button" type="submit">Copier et créer la zone</button>
+      <button class="button" type="submit">Continuer</button>
     </form>
   </section>
-  <section class="card"><div class="step">02 / MACHINE</div><h2>Connecter une machine</h2><p>La configuration WireGuard est montrée une seule fois. Conservez-la sur votre machine.</p>
+  <section class="card"><div class="step">Étape 2 · Machine</div><h2>Connecter une machine</h2><p>La configuration WireGuard est montrée une seule fois. Conservez-la sur votre machine.</p>
     <form method="post" action="{{ url_for('add_machine') }}">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <label>Nom de la machine<input name="name" placeholder="Salon" maxlength="80" required></label>
       <button class="button" type="submit">Créer une configuration</button>
     </form>
   </section>
-  <section class="card"><div class="step">03 / ADRESSE</div><h2>Publier un service</h2><p>L'adresse répondra sur votre domaine quand la délégation sera active.</p>
+  <section class="card"><div class="step">Étape 3 · Adresse</div><h2>Publier un service</h2><p>L'adresse répondra sur votre domaine quand la délégation sera active.</p>
     <form method="post" action="{{ url_for('add_address') }}">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <label>Domaine<select name="domain_id" required><option value="">Choisir</option>{% for domain in domains %}<option value="{{ domain.id }}">{{ domain.name }}</option>{% endfor %}</select></label>
@@ -32,7 +32,7 @@
   </section>
 </div>
 <div class="list-grid">
-  <section class="card"><h2>Domaines</h2>{% if domains %}<ul class="item-list">{% for domain in domains %}<li><a href="{{ url_for('domain_detail', domain_id=domain.id) }}">{{ domain.name }}</a><span>Voir la zone</span></li>{% endfor %}</ul>{% else %}<p class="empty">Aucun domaine pour le moment.</p>{% endif %}</section>
+  <section class="card"><h2>Domaines</h2>{% if domains or claims %}<ul class="item-list">{% for domain in domains %}<li><a href="{{ url_for('domain_detail', domain_id=domain.id) }}">{{ domain.name }}</a><span>Voir la zone</span></li>{% endfor %}{% for claim in claims %}<li><a href="{{ url_for('claim_detail', claim_id=claim.id) }}">{{ claim.name }}</a><span class="pending">À vérifier</span></li>{% endfor %}</ul>{% else %}<p class="empty">Aucun domaine pour le moment.</p>{% endif %}</section>
   <section class="card"><h2>Machines</h2>{% if machines %}<ul class="item-list">{% for machine in machines %}<li><div><strong>{{ machine.name }}</strong><span>{{ machine.ip }}</span></div><form method="post" action="{{ url_for('delete_machine', machine_id=machine.id) }}"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="quiet" type="submit">Supprimer</button></form></li>{% endfor %}</ul>{% else %}<p class="empty">Aucune machine connectée.</p>{% endif %}</section>
 </div>
 <section class="card wide"><h2>Adresses</h2>{% if addresses %}<div class="table-wrap"><table><thead><tr><th>Adresse</th><th>Machine</th><th>Port</th><th>Accès</th><th></th></tr></thead><tbody>{% for address in addresses %}<tr><td><strong>{{ address.hostname }}</strong></td><td>{{ address.machine_name }}</td><td>{{ address.port }}</td><td>{% if address.protected %}<a href="{{ url_for('address_access', address_id=address.id) }}">{{ 'Partagé · ' ~ address.grant_count ~ ' adresse(s)' if address.shared else 'Moi uniquement' }}</a>{% else %}Public{% endif %}</td><td><form method="post" action="{{ url_for('delete_address', address_id=address.id) }}"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="quiet" type="submit">Supprimer</button></form></td></tr>{% endfor %}</tbody></table></div>{% else %}<p class="empty">Aucune adresse publiée.</p>{% endif %}</section>
