@@ -156,7 +156,7 @@ def main() -> None:
         run("ip", "netns", "exec", NS, "ping", "-c", "1", "-W", "2", "10.88.0.1", check=False)
         time.sleep(1)
 
-        test_caddy = original_caddy.replace("{\n    email", "{\n    local_certs\n    email", 1)
+        test_caddy = original_caddy.replace("\n    email ", "\n    local_certs\n    email ", 1)
         if test_caddy == original_caddy:
             raise RuntimeError("Le Caddyfile n'a pas le format attendu pour le test.")
         CONFIG.write_text(test_caddy)
@@ -244,6 +244,11 @@ def main() -> None:
                    f"https://{HOST}/", check=False).stdout.strip()
         if leak != "421":
             raise AssertionError(f"Une adresse publiée a accepté un jeton Synunnel (statut {leak}).")
+        shouted = run(*base, "--resolve", f"{HOST}:443:{values['PUBLIC_IPV4']}", "--output", "/dev/null",
+                      "--write-out", "%{http_code}", "--header", f"Authorization: BEARER {api_token}",
+                      f"https://{HOST}/", check=False).stdout.strip()
+        if shouted != "421":
+            raise AssertionError(f"Le filtre des jetons dépend de la casse (statut {shouted}).")
         print("Jeton Synunnel refusé par une adresse publiée, jamais transmis au service : OK")
         completed = True
     finally:
