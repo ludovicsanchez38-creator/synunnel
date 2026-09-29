@@ -2,7 +2,14 @@
 {% block title %}Connexion{% endblock %}
 {% block content %}
 <section class="auth-layout">
-  <div class="intro"><span class="eyebrow">ACCÈS PRIVÉ</span><h1>Vos services, à votre adresse.</h1><p>Reliez les machines de votre choix à votre domaine, sans ouvrir de port sur votre box.</p><div class="rule"></div><p class="muted">Les nouveaux comptes sont vérifiés par l'administrateur avant tout accès.</p></div>
+  <div class="intro"><span class="eyebrow">Accès privé</span><h1>Vos services, à votre adresse.</h1><p>Reliez les machines de votre choix à votre propre domaine, sans ouvrir de port sur votre box.</p>
+    <ul class="features">
+      <li><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#2451FF" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>Votre domaine, délégué par deux serveurs de noms</li>
+      <li><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#2451FF" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>HTTPS automatique pour chaque adresse</li>
+      <li><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#2451FF" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>Un tunnel WireGuard par machine, aucun port entrant</li>
+      <li><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#2451FF" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>Adresses publiques ou réservées à des comptes choisis</li>
+    </ul>
+    <p class="muted">Les nouveaux comptes sont vérifiés par l'administrateur avant tout accès.</p></div>
   <div class="card auth-card"><h2>Connexion</h2><p class="muted">Retrouvez vos domaines, machines et adresses.</p>
     <form method="post" action="{{ url_for('login') }}">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}"><input type="hidden" name="next" value="{{ next_url }}">

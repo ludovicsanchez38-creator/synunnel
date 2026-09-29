@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block title %}Accès à {{ address.hostname }}{% endblock %}
 {% block content %}
-<section class="page-head"><a class="back" href="{{ url_for('dashboard') }}">← Tableau de bord</a><span class="eyebrow">ACCÈS À L'ADRESSE</span><h1>{{ address.hostname }}</h1><p>Vous gardez toujours l'accès. Les personnes ajoutées doivent posséder un compte Synunnel approuvé par l'administrateur. Retirer une adresse coupe son accès dès la requête suivante.</p></section>
+<section class="page-head"><a class="back" href="{{ url_for('dashboard') }}">← Tableau de bord</a><span class="eyebrow">Accès à l'adresse</span><h1>{{ address.hostname }}</h1><p>Vous gardez toujours l'accès. Les personnes ajoutées doivent posséder un compte Synunnel approuvé par l'administrateur. Retirer une adresse coupe son accès dès la requête suivante.</p></section>
 <section class="card access-card"><h2>Partage</h2><form method="post">
   <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
   <label class="check"><input type="checkbox" name="shared" value="1" {% if address.shared %}checked{% endif %}><span>Activer l'accès partagé</span></label>

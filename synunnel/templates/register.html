@@ -2,7 +2,7 @@
 {% block title %}Inscription{% endblock %}
 {% block content %}
 <section class="auth-layout">
-  <div class="intro"><span class="eyebrow">BIENVENUE</span><h1>Un domaine. Vos machines. Votre accès.</h1><p>Créez un compte pour préparer votre espace. Ludo doit le valider avant que vous puissiez ajouter un domaine.</p><div class="rule"></div><p class="muted">Synunnel n'envoie pas de mail automatique.</p></div>
+  <div class="intro"><span class="eyebrow">Bienvenue</span><h1>Publiez vos services sur votre domaine.</h1><p>Créez un compte pour préparer votre espace. L'administrateur de cette instance le valide avant que vous puissiez ajouter un domaine.</p><p class="muted">Synunnel n'envoie aucun mail automatique : l'administrateur vous prévient lui-même.</p></div>
   <div class="card auth-card"><h2>Demander un accès</h2>
     <form method="post" action="{{ url_for('register') }}">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">

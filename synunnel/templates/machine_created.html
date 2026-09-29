@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 {% block title %}Machine créée{% endblock %}
 {% block content %}
-<section class="page-head"><span class="eyebrow">CONFIGURATION UNIQUE</span><h1>{{ name }} est prête</h1><p>Copiez cette configuration maintenant dans l'application WireGuard officielle de votre machine. La clé privée ne sera plus affichée et n'est pas conservée sur le serveur.</p></section>
+<section class="page-head"><span class="eyebrow">Configuration unique</span><h1>{{ name }} est prête</h1><p>Copiez cette configuration maintenant dans l'application WireGuard officielle de votre machine. La clé privée ne sera plus affichée et n'est pas conservée sur le serveur.</p></section>
 <section class="card wide secret-card"><h2>Configuration WireGuard</h2><textarea readonly rows="12" spellcheck="false" aria-label="Configuration WireGuard">{{ config }}</textarea><p class="small">Le service local doit écouter sur l'adresse de cette machine ou sur toutes ses interfaces, et son pare-feu doit accepter le port choisi depuis 10.88.0.1.</p><a class="button" href="{{ url_for('dashboard') }}">Revenir au tableau de bord</a></section>
 {% endblock %}
