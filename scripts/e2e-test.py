@@ -10,6 +10,8 @@ ne jamais le lancer sur une instance qui sert de vrais utilisateurs.
 import base64
 import email
 import hashlib
+import importlib.metadata
+import importlib.util
 import json
 import os
 import re
@@ -22,6 +24,7 @@ import tempfile
 import threading
 import time
 from pathlib import Path
+from urllib.parse import quote
 
 from argon2 import PasswordHasher
 
@@ -32,6 +35,9 @@ DOMAIN = "e2e.synunnel.test"
 HOST = f"nas.{DOMAIN}"
 PROTECTED = f"prive.{DOMAIN}"
 UNKNOWN = f"inconnu.{DOMAIN}"
+# Domaine sans zone ni adresse, pour le refus de suppression : la zone parente (.test) n'existe pas, la
+# délégation ne se vérifie donc pas et la suppression doit être refusée (409), rien n'étant retiré.
+SPARE = "e2e-suppr.synunnel.test"
 EMAIL = "e2e@synunnel.invalid"
 NS = "sn-e2e"
 VETH_HOST = "sn-e2e-host"
@@ -139,11 +145,20 @@ def main() -> None:
     if os.environ.get("SYNUNNEL_E2E_DISPOSABLE") != "1":
         raise SystemExit("Essai réservé à une machine jetable : relance avec SYNUNNEL_E2E_DISPOSABLE=1.")
     values = env_file()
+    # L'essai tourne avec l'environnement installé : il doit être celui du verrou, sans outils de développement.
+    if importlib.util.find_spec("pytest") or importlib.util.find_spec("ruff"):
+        raise AssertionError("L'environnement installé contient des outils de développement.")
+    crypto = tuple(int(part) for part in importlib.metadata.version("cryptography").split(".")[:3])
+    if crypto < (50, 0, 1):
+        raise AssertionError(f"cryptography {crypto} installée, 50.0.1 au moins attendue.")
+    print("Environnement installé depuis le verrou, sans outils de développement, cryptography à jour : OK")
     db = sqlite3.connect(values["DATABASE"], timeout=10)
     db.row_factory = sqlite3.Row
     db.execute("PRAGMA foreign_keys=ON")
     if db.execute("SELECT 1 FROM domains WHERE name=?", (DOMAIN,)).fetchone():
         raise SystemExit("La zone de test existe déjà ; aucune donnée n'a été touchée.")
+    if db.execute("SELECT 1 FROM domains WHERE name=?", (SPARE,)).fetchone():
+        raise SystemExit("Le domaine de test existe déjà ; aucune donnée n'a été touchée.")
     if db.execute("SELECT 1 FROM users WHERE email=?", (EMAIL,)).fetchone():
         raise SystemExit("Le compte de test existe déjà ; aucune donnée n'a été touchée.")
     if NS in run("ip", "netns", "list").stdout:
@@ -468,8 +483,10 @@ def main() -> None:
         message = email.message_from_string(inbox[-1])
         body = message.get_payload(decode=True).decode("utf-8")
         code = re.search(r"\b(\d{6})\b", body).group(1)
-        if message["To"] != GUEST_EMAIL or "https://" in body:
-            raise AssertionError("Le mail de code n'a pas la forme attendue.")
+        # Aucun lien qui ouvre l'accès : le seul lien est celui de la notice de confidentialité de l'instance.
+        if (message["To"] != GUEST_EMAIL or re.findall(r"https://\S+", body) != [f"https://{dashboard_host}/confidentialite"]
+                or "Pour ne plus figurer dans la liste" not in body):
+            raise AssertionError(f"Le mail de code n'a pas la forme attendue : {body[:600]!r}")
         _, _, html = web("/access/verify")
         status, _, html = web("/access/verify", {"csrf_token": csrf_of(html), "code": code})
         relay = re.search(r'href="([^"]+)">Continuer', html)
@@ -568,6 +585,51 @@ def main() -> None:
         if status != 302 or not location.endswith("/dashboard"):
             raise AssertionError(f"Mot de passe oublié par mail : nouvelle connexion refusée ({status} {location}).")
         print("Mot de passe oublié par mail (lien lu dans la boîte simulée) : OK")
+
+        # HEAD rend le statut de GET et n'écrit rien : ni tentative, ni quota, ni événement.
+        def tally() -> list[int]:
+            return [db.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+                    for table in ("attempts", "guest_quota", "security_events", "password_resets")]
+
+        before_head = tally()
+        guest_page = "/access/code?next=" + quote(f"https://{PROTECTED}/", safe="")
+        for path in ("/forgot", "/login", "/register", guest_page):
+            expected = run(*base, "--resolve", resolve, "--output", "/dev/null", "--write-out", "%{http_code}",
+                           f"https://{dashboard_host}{path}", check=False).stdout.strip()
+            for _ in range(6):
+                probed = run(*base, "--resolve", resolve, "--head", "--output", "/dev/null", "--write-out",
+                             "%{http_code}", f"https://{dashboard_host}{path}", check=False).stdout.strip()
+                if probed != expected:
+                    raise AssertionError(f"HEAD {path} : {probed}, GET : {expected}.")
+        if tally() != before_head:
+            raise AssertionError(f"Des requêtes HEAD ont écrit en base : {before_head} -> {tally()}.")
+        print("HEAD sur /forgot, /login, /register et /access/code : statut de GET, rien écrit : OK")
+
+        # Suppression refusée tant que la délégation n'est pas vérifiée comme retirée, par l'API et par la page.
+        spare_token = "syn_" + secrets.token_urlsafe(32)
+        with db:
+            spare_id = db.execute("INSERT INTO domains(user_id,name,created_at) VALUES(?,?,?)",
+                                  (user_id, SPARE, "2026-09-27T00:00:00Z")).lastrowid
+            db.execute(
+                "INSERT INTO api_tokens(user_id,name,token_hash,prefix,scopes,created_at,expires_at,credential_version) "
+                "SELECT ?,?,?,?,?,?,?,credential_version FROM users WHERE id=?",
+                (user_id, "e2e-suppr", hashlib.sha256(spare_token.encode()).hexdigest(), spare_token[:10], "domains",
+                 "2026-09-27T00:00:00Z", int(time.time()) + 3600, user_id),
+            )
+        reply = run(*base, "--resolve", resolve, "--request", "DELETE", "--header",
+                    f"Authorization: Bearer {spare_token}", "--write-out", "\n%{http_code}",
+                    f"https://{dashboard_host}/api/v1/domains/{spare_id}", check=False).stdout
+        body, _, code = reply.rpartition("\n")
+        refusal = json.loads(body or "{}").get("error", {}).get("code")
+        if code != "409" or refusal not in {"delegation_unknown", "delegation_active"}:
+            raise AssertionError(f"Suppression par l'API non refusée : {code} {body[:200]!r}")
+        status, _, html = web(f"/domains/{spare_id}/delete")
+        if status != 200 or 'name="confirm_name"' not in html:
+            raise AssertionError(f"Page de confirmation de suppression absente ({status}).")
+        status, _, _ = web(f"/domains/{spare_id}/delete", {"csrf_token": csrf_of(html), "confirm_name": SPARE})
+        if status != 302 or not db.execute("SELECT 1 FROM domains WHERE id=?", (spare_id,)).fetchone():
+            raise AssertionError("Le domaine a été supprimé sans délégation vérifiée.")
+        print(f"Suppression refusée (409 {refusal}) par l'API et par la page, nom retapé exigé : OK")
         completed = True
     finally:
         errors: list[str] = []
