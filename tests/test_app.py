@@ -23,19 +23,19 @@ def app(tmp_path, monkeypatch):
         WG_SERVER_PUBLIC_KEY="test-server-public-key",
     ))
     PROOFS.clear()
-    monkeypatch.setattr("synunnel.web.ownership_proof", lambda domain: PROOFS.get(domain, set()))
+    monkeypatch.setattr("synunnel.actions.ownership_proof", lambda domain: PROOFS.get(domain, set()))
     counter = iter(range(1, 250))
 
     def keypair():
         n = next(counter)
         return (base64.b64encode(bytes([n]) * 32).decode(), base64.b64encode(bytes([n, 255]) * 16).decode())
 
-    monkeypatch.setattr("synunnel.web.generate_keypair", keypair)
+    monkeypatch.setattr("synunnel.actions.generate_keypair", keypair)
     monkeypatch.setattr(
-        "synunnel.web.snapshot_records",
+        "synunnel.actions.snapshot_records",
         lambda domain, selectors: [("@", "MX", f"10 mail.{domain}.", 3600), ("@", "TXT", '"v=spf1 -all"', 3600)],
     )
-    monkeypatch.setattr("synunnel.web.delegation_status", lambda domain, nameservers: (False, []))
+    monkeypatch.setattr("synunnel.actions.delegation_status", lambda domain, nameservers: (False, []))
     return app
 
 
@@ -486,7 +486,7 @@ def test_claim_cancelled_during_verification_is_not_converted(app, monkeypatch):
             db.commit()
         return {proof}
 
-    monkeypatch.setattr("synunnel.web.ownership_proof", proof_then_cancel)
+    monkeypatch.setattr("synunnel.actions.ownership_proof", proof_then_cancel)
     response = client.post(f"/claims/{claim_id}/verify", data={"csrf_token": csrf(client)})
     assert "/domains/" not in response.headers["Location"]
     with app.app_context():

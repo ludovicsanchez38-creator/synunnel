@@ -5,14 +5,11 @@ import hmac
 import os
 import re
 import secrets
-import shlex
 import sqlite3
-import subprocess
 import time
 from functools import wraps
 from urllib.parse import quote, urlsplit
 
-import requests
 from argon2 import PasswordHasher
 from argon2.exceptions import VerifyMismatchError
 from flask import (
@@ -29,21 +26,11 @@ from flask import (
 )
 from werkzeug.middleware.proxy_fix import ProxyFix
 
-from . import VERSION_LABEL
+from . import VERSION_LABEL, actions
 from .db import close_db, get_db, init_db, now_iso
 from .dns import (
-    VERIFY_LABEL,
-    PowerDNS,
-    canonical_content,
-    delegation_status,
-    fqdn,
-    normalize_domain,
-    ownership_proof,
-    relative_name,
-    snapshot_records,
     system_reservations,
 )
-from .provision import generate_keypair
 
 PASSWORDS = PasswordHasher()
 EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
@@ -64,18 +51,10 @@ def _client_ip() -> str:
 
 
 def _rate_limit(kind: str, key: str, limit: int, window: int) -> None:
-    db = get_db()
-    now = int(time.time())
-    db.execute("DELETE FROM attempts WHERE at < ?", (now - 86400,))
-    count = db.execute(
-        "SELECT COUNT(*) FROM attempts WHERE kind=? AND key=? AND at>=?",
-        (kind, key, now - window),
-    ).fetchone()[0]
-    if count >= limit:
-        db.commit()
-        abort(429, "Trop de tentatives. Réessaie plus tard.")
-    db.execute("INSERT INTO attempts(kind, key, at) VALUES (?, ?, ?)", (kind, key, now))
-    db.commit()
+    try:
+        actions.rate_limit(kind, key, limit, window)
+    except actions.ActionError as exc:
+        abort(exc.status, exc.message)
 
 
 def _login_required(fn):
@@ -87,56 +66,6 @@ def _login_required(fn):
     return wrapper
 
 
-def _owned_domain(domain_id: int):
-    row = get_db().execute(
-        "SELECT * FROM domains WHERE id=? AND user_id=?", (domain_id, g.user["id"]),
-    ).fetchone()
-    if row is None:
-        abort(404)
-    return row
-
-
-def _owned_machine(machine_id: int):
-    row = get_db().execute(
-        "SELECT * FROM machines WHERE id=? AND user_id=?", (machine_id, g.user["id"]),
-    ).fetchone()
-    if row is None:
-        abort(404)
-    return row
-
-
-def _refuse_overlap(db, domain: str) -> None:
-    """Refuse un domaine qui contient une zone existante ou qui est contenu dans l'une d'elles."""
-    row = db.execute(
-        "SELECT name FROM domains WHERE name=? OR substr(?, -length(name) - 1)='.' || name "
-        "OR substr(name, -length(?) - 1)='.' || ? LIMIT 1",
-        (domain, domain, domain, domain),
-    ).fetchone()
-    if row is not None:
-        if row["name"] == domain:
-            raise ValueError("Ce domaine est déjà enregistré.")
-        raise ValueError(f"Ce domaine recouvre la zone {row['name']}, déjà gérée par l'instance.")
-
-
-def _pdns(app: Flask) -> PowerDNS:
-    return PowerDNS(app.config["PDNS_API_URL"], app.config["PDNS_API_KEY"], (
-        f"{app.config['NS1_HOST']}.", f"{app.config['NS2_HOST']}.",
-    ))
-
-
-def _sync_zone(app: Flask, db, domain) -> None:
-    if app.config["PDNS_ENABLED"]:
-        _pdns(app).sync_zone(
-            db, domain["id"], domain["name"], app.config["PUBLIC_IPV4"], app.config["PUBLIC_IPV6"],
-        )
-
-
-def _sync_runtime(app: Flask) -> None:
-    command = app.config.get("SYNC_COMMAND", "")
-    if command:
-        subprocess.run(shlex.split(command), check=True, capture_output=True, timeout=20)
-
-
 def _authorized_protected_user(hostname: str, user_id: int) -> bool:
     return get_db().execute(
         "SELECT 1 FROM addresses a JOIN domains d ON d.id=a.domain_id "
@@ -146,13 +75,6 @@ def _authorized_protected_user(hostname: str, user_id: int) -> bool:
         "SELECT 1 FROM address_grants g WHERE g.address_id=a.id AND g.email=u.email)))",
         (user_id, hostname),
     ).fetchone() is not None
-
-
-def _parse_grants(raw: str) -> list[str]:
-    emails = sorted({part.lower() for part in re.split(r"[,;\s]+", raw.strip()) if part})
-    if len(emails) > 100 or any(len(email) > 254 or not EMAIL_RE.fullmatch(email) for email in emails):
-        raise ValueError("Liste invalide : au maximum 100 adresses mail valides.")
-    return emails
 
 
 def _validate_next(value: str, user_id: int) -> tuple[str, str] | None:
@@ -357,180 +279,78 @@ def create_app(config_override: dict | None = None) -> Flask:
     @app.get("/dashboard")
     @_login_required
     def dashboard():
-        db = get_db()
-        domains = db.execute("SELECT * FROM domains WHERE user_id=? ORDER BY name", (g.user["id"],)).fetchall()
-        claims = db.execute(
-            "SELECT * FROM domain_claims WHERE user_id=? ORDER BY name", (g.user["id"],),
-        ).fetchall()
-        machines = db.execute("SELECT * FROM machines WHERE user_id=? ORDER BY name", (g.user["id"],)).fetchall()
-        addresses = db.execute(
-            "SELECT a.*, d.name AS domain_name, m.name AS machine_name, "
-            "(SELECT COUNT(*) FROM address_grants g WHERE g.address_id=a.id) AS grant_count "
-            "FROM addresses a "
-            "JOIN domains d ON d.id=a.domain_id JOIN machines m ON m.id=a.machine_id "
-            "WHERE d.user_id=? ORDER BY a.hostname", (g.user["id"],),
-        ).fetchall()
-        return render_template("dashboard.html", domains=domains, claims=claims, machines=machines,
-                               addresses=addresses)
+        return render_template("dashboard.html", **actions.account_overview(g.user["id"]))
+
+    def _flash_error(exc: actions.ActionError):
+        if exc.status == 404:
+            abort(404)
+        if exc.status == 429:
+            abort(429, exc.message)
+        flash(exc.message, "error")
 
     @app.post("/domains")
     @_login_required
     def add_domain():
-        db = get_db()
+        raw_selectors = request.form.get("selectors", "").replace(";", ",").split(",")
         try:
-            domain = normalize_domain(request.form.get("domain", ""), app.config["RESERVED_DOMAINS"])
-            raw_selectors = request.form.get("selectors", "").replace(";", ",")
-            selectors = [relative_name(item.strip()) for item in raw_selectors.split(",") if item.strip()]
-            if len(selectors) > 20 or any("." in item or item == "@" for item in selectors):
-                raise ValueError("Au maximum 20 sélecteurs DKIM simples.")
-            if not request.form.get("mail_checked"):
-                raise ValueError("Confirme la vérification des enregistrements mail et des sélecteurs DKIM.")
-            with db:
-                db.execute("BEGIN IMMEDIATE")
-                _refuse_overlap(db, domain)
-                owned = db.execute("SELECT COUNT(*) FROM domains WHERE user_id=?", (g.user["id"],)).fetchone()[0]
-                pending = db.execute(
-                    "SELECT COUNT(*) FROM domain_claims WHERE user_id=? AND name<>?", (g.user["id"], domain),
-                ).fetchone()[0]
-                if owned + pending >= app.config["MAX_DOMAINS_PER_USER"]:
-                    raise ValueError("Nombre maximal de domaines atteint pour ce compte.")
-                db.execute(
-                    "INSERT INTO domain_claims(user_id,name,token,selectors,created_at) VALUES(?,?,?,?,?) "
-                    "ON CONFLICT(user_id,name) DO UPDATE SET selectors=excluded.selectors",
-                    (g.user["id"], domain, secrets.token_urlsafe(24), ",".join(selectors), now_iso()),
-                )
-            claim_id = db.execute(
-                "SELECT id FROM domain_claims WHERE user_id=? AND name=?", (g.user["id"], domain),
-            ).fetchone()[0]
-        except (ValueError, sqlite3.IntegrityError) as exc:
-            flash(str(exc), "error")
+            claim = actions.create_claim(app, g.user["id"], request.form.get("domain", ""), raw_selectors,
+                                         bool(request.form.get("mail_checked")))
+        except actions.ActionError as exc:
+            _flash_error(exc)
             return redirect(url_for("dashboard"))
-        return redirect(url_for("claim_detail", claim_id=claim_id))
-
-    def _owned_claim(claim_id: int):
-        row = get_db().execute(
-            "SELECT * FROM domain_claims WHERE id=? AND user_id=?", (claim_id, g.user["id"]),
-        ).fetchone()
-        if row is None:
-            abort(404)
-        return row
+        return redirect(url_for("claim_detail", claim_id=claim["id"]))
 
     @app.get("/claims/<int:claim_id>")
     @_login_required
     def claim_detail(claim_id: int):
-        claim = _owned_claim(claim_id)
-        return render_template("claim.html", claim=claim, label=f"{VERIFY_LABEL}.{claim['name']}",
-                               value=f"synunnel-verification={claim['token']}")
+        try:
+            claim = actions.owned_claim(g.user["id"], claim_id)
+        except actions.ActionError:
+            abort(404)
+        proof = actions.claim_proof(claim)
+        return render_template("claim.html", claim=claim, label=proof["name"], value=proof["value"])
 
     @app.post("/claims/<int:claim_id>/delete")
     @_login_required
     def delete_claim(claim_id: int):
-        _owned_claim(claim_id)
-        with get_db() as db:
-            db.execute("DELETE FROM domain_claims WHERE id=? AND user_id=?", (claim_id, g.user["id"]))
-        flash("Demande annulée.", "success")
+        try:
+            actions.cancel_claim(g.user["id"], claim_id)
+        except actions.ActionError as exc:
+            _flash_error(exc)
+        else:
+            flash("Demande annulée.", "success")
         return redirect(url_for("dashboard"))
 
     @app.post("/claims/<int:claim_id>/verify")
     @_login_required
     def verify_claim(claim_id: int):
-        claim = _owned_claim(claim_id)
-        _rate_limit("verify", str(g.user["id"]), 20, 3600)
-        domain = claim["name"]
-        db = get_db()
         try:
-            # Une réservation ajoutée après la demande s'applique aussi à la vérification.
-            normalize_domain(domain, app.config["RESERVED_DOMAINS"])
-            _refuse_overlap(db, domain)
-            if f"synunnel-verification={claim['token']}" not in ownership_proof(domain):
-                raise ValueError("Enregistrement de vérification introuvable. S'il vient d'être ajouté, "
-                                 "réessaie dans quelques minutes.")
-            selectors = [item for item in claim["selectors"].split(",") if item]
-            snapshot = snapshot_records(domain, selectors)
-            if not snapshot:
-                raise ValueError("Aucun enregistrement public trouvé ; la copie DNS serait vide.")
-            pdns = _pdns(app) if app.config["PDNS_ENABLED"] else None
-            if pdns:
-                pdns.create_zone(domain)
-            try:
-                with db:
-                    db.execute("BEGIN IMMEDIATE")
-                    if not db.execute(
-                        "SELECT 1 FROM domain_claims WHERE id=? AND user_id=? AND name=? AND token=?",
-                        (claim_id, g.user["id"], domain, claim["token"]),
-                    ).fetchone():
-                        raise ValueError("Cette demande a été annulée entre-temps.")
-                    owned = db.execute("SELECT COUNT(*) FROM domains WHERE user_id=?", (g.user["id"],)).fetchone()[0]
-                    if owned >= app.config["MAX_DOMAINS_PER_USER"]:
-                        raise ValueError("Nombre maximal de domaines atteint pour ce compte.")
-                    _refuse_overlap(db, domain)
-                    domain_id = db.execute(
-                        "INSERT INTO domains(user_id,name,created_at) VALUES(?,?,?)",
-                        (g.user["id"], domain, now_iso()),
-                    ).lastrowid
-                    db.executemany(
-                        "INSERT INTO records(domain_id,name,type,content,ttl) VALUES(?,?,?,?,?)",
-                        [(domain_id, *record) for record in snapshot],
-                    )
-                    # La preuve est faite : les demandes concurrentes sur ce nom tombent.
-                    db.execute("DELETE FROM domain_claims WHERE name=?", (domain,))
-                    if pdns:
-                        pdns.sync_zone(db, domain_id, domain, app.config["PUBLIC_IPV4"], app.config["PUBLIC_IPV6"])
-            except Exception:
-                if pdns:
-                    pdns.delete_zone(domain)
-                raise
-        except (ValueError, sqlite3.IntegrityError) as exc:
-            flash(str(exc), "error")
+            domain_id, copied = actions.verify_claim(app, g.user["id"], claim_id)
+        except actions.ActionError as exc:
+            _flash_error(exc)
             return redirect(url_for("claim_detail", claim_id=claim_id))
-        except requests.RequestException:
-            flash("Le serveur DNS de l'instance a refusé la création de la zone. Réessaie ou préviens "
-                  "l'administrateur.", "error")
-            return redirect(url_for("claim_detail", claim_id=claim_id))
-        flash(f"Domaine vérifié. Zone {domain} créée avec {len(snapshot)} enregistrements repris. "
-              "Vérifie-la avant délégation.", "success")
+        flash(f"Domaine vérifié. Zone créée avec {copied} enregistrements repris. Vérifie-la avant délégation.",
+              "success")
         return redirect(url_for("domain_detail", domain_id=domain_id))
 
     @app.get("/domains/<int:domain_id>")
     @_login_required
     def domain_detail(domain_id: int):
-        domain = _owned_domain(domain_id)
-        rows = get_db().execute(
-            "SELECT * FROM records WHERE domain_id=? ORDER BY name,type,content", (domain_id,),
-        ).fetchall()
-        nameservers = (f"{app.config['NS1_HOST']}.", f"{app.config['NS2_HOST']}.")
-        active, parent_ns = delegation_status(domain["name"], nameservers)
-        return render_template("domain.html", domain=domain, records=rows, active=active,
-                               parent_ns=parent_ns, nameservers=nameservers)
+        try:
+            view = actions.domain_view(app, g.user["id"], domain_id)
+        except actions.ActionError:
+            abort(404)
+        return render_template("domain.html", **view)
 
     @app.post("/domains/<int:domain_id>/records")
     @_login_required
     def add_record(domain_id: int):
-        domain = _owned_domain(domain_id)
-        db = get_db()
         try:
-            name = relative_name(request.form.get("name", ""))
-            kind = request.form.get("type", "").upper()
-            content = canonical_content(kind, request.form.get("content", ""))
-            ttl = int(request.form.get("ttl", "3600"))
-            if not 300 <= ttl <= 86400:
-                raise ValueError("TTL entre 300 et 86 400 secondes.")
-            existing = db.execute("SELECT type FROM records WHERE domain_id=? AND name=?", (domain_id, name)).fetchall()
-            if (kind == "CNAME" and existing) or (kind != "CNAME" and any(row["type"] == "CNAME" for row in existing)):
-                raise ValueError("Un CNAME ne peut partager son nom avec un autre enregistrement.")
-            host = fqdn(name, domain["name"]).rstrip(".")
-            if kind in {"A", "AAAA", "CNAME"} and db.execute(
-                "SELECT 1 FROM addresses WHERE hostname=?", (host,),
-            ).fetchone():
-                raise ValueError("Cette adresse est gérée par Synunnel ; supprime-la avant de modifier son DNS.")
-            with db:
-                db.execute(
-                    "INSERT INTO records(domain_id,name,type,content,ttl) VALUES(?,?,?,?,?)",
-                    (domain_id, name, kind, content, ttl),
-                )
-                _sync_zone(app, db, domain)
-        except (ValueError, sqlite3.IntegrityError) as exc:
-            flash(str(exc), "error")
+            actions.add_record(app, g.user["id"], domain_id, request.form.get("name", ""),
+                               request.form.get("type", ""), request.form.get("content", ""),
+                               request.form.get("ttl", "3600"))
+        except actions.ActionError as exc:
+            _flash_error(exc)
         else:
             flash("Enregistrement ajouté.", "success")
         return redirect(url_for("domain_detail", domain_id=domain_id))
@@ -538,178 +358,79 @@ def create_app(config_override: dict | None = None) -> Flask:
     @app.post("/domains/<int:domain_id>/records/<int:record_id>/delete")
     @_login_required
     def delete_record(domain_id: int, record_id: int):
-        domain = _owned_domain(domain_id)
-        db = get_db()
-        with db:
-            cursor = db.execute("DELETE FROM records WHERE id=? AND domain_id=?", (record_id, domain_id))
-            if cursor.rowcount != 1:
-                abort(404)
-            _sync_zone(app, db, domain)
-        flash("Enregistrement supprimé.", "success")
+        try:
+            actions.delete_record(app, g.user["id"], domain_id, record_id)
+        except actions.ActionError as exc:
+            _flash_error(exc)
+        else:
+            flash("Enregistrement supprimé.", "success")
         return redirect(url_for("domain_detail", domain_id=domain_id))
 
     @app.post("/machines")
     @_login_required
     def add_machine():
-        name = request.form.get("name", "").strip()
-        if not 1 <= len(name) <= 80:
-            flash("Nom de machine invalide.", "error")
-            return redirect(url_for("dashboard"))
-        db = get_db()
-        private_key, public_key = generate_keypair()
         try:
-            with db:
-                # Quota et choix de l'IP sous verrou d'écriture : deux ajouts simultanés ne
-                # peuvent ni dépasser le quota ni viser la même adresse.
-                db.execute("BEGIN IMMEDIATE")
-                owned = db.execute("SELECT COUNT(*) FROM machines WHERE user_id=?", (g.user["id"],)).fetchone()[0]
-                if owned >= app.config["MAX_MACHINES_PER_USER"]:
-                    raise ValueError("Nombre maximal de machines atteint pour ce compte.")
-                used = {row[0] for row in db.execute("SELECT ip FROM machines")}
-                ip = next((f"10.88.0.{n}" for n in range(2, 255) if f"10.88.0.{n}" not in used), None)
-                if ip is None:
-                    raise ValueError("Plage d'adresses WireGuard épuisée.")
-                cursor = db.execute(
-                    "INSERT INTO machines(user_id,name,ip,public_key,created_at) VALUES(?,?,?,?,?)",
-                    (g.user["id"], name, ip, public_key, now_iso()),
-                )
-            _sync_runtime(app)
-        except ValueError as exc:
-            flash(str(exc), "error")
+            machine = actions.create_machine(app, g.user["id"], request.form.get("name", ""))
+        except actions.ActionError as exc:
+            _flash_error(exc)
             return redirect(url_for("dashboard"))
-        except (sqlite3.IntegrityError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
-            if "cursor" in locals():
-                with db:
-                    db.execute("DELETE FROM machines WHERE id=? AND user_id=?", (cursor.lastrowid, g.user["id"]))
-                _sync_runtime(app)
-            flash("La machine n'a pas pu être ajoutée. Vérifie son nom ou la synchronisation WireGuard.", "error")
-            return redirect(url_for("dashboard"))
-        config = (
-            "[Interface]\n"
-            f"PrivateKey = {private_key}\nAddress = {ip}/32\n\n"
-            "[Peer]\n"
-            f"PublicKey = {app.config['WG_SERVER_PUBLIC_KEY']}\n"
-            f"Endpoint = {app.config['WG_ENDPOINT']}\n"
-            "AllowedIPs = 10.88.0.1/32\nPersistentKeepalive = 25\n"
-        )
-        response = app.make_response(render_template("machine_created.html", name=name, config=config))
+        response = app.make_response(render_template("machine_created.html", name=machine["name"],
+                                                     config=machine["config"]))
         response.headers["Cache-Control"] = "no-store"
         return response
 
     @app.post("/machines/<int:machine_id>/delete")
     @_login_required
     def delete_machine(machine_id: int):
-        _owned_machine(machine_id)
-        db = get_db()
-        if db.execute("SELECT 1 FROM addresses WHERE machine_id=?", (machine_id,)).fetchone():
-            flash("Supprime d'abord les adresses liées à cette machine.", "error")
-            return redirect(url_for("dashboard"))
-        with db:
-            db.execute("DELETE FROM machines WHERE id=?", (machine_id,))
-        _sync_runtime(app)
-        flash("Machine supprimée.", "success")
+        try:
+            actions.delete_machine(app, g.user["id"], machine_id)
+        except actions.ActionError as exc:
+            _flash_error(exc)
+        else:
+            flash("Machine supprimée.", "success")
         return redirect(url_for("dashboard"))
 
     @app.post("/addresses")
     @_login_required
     def add_address():
         try:
-            domain_id = int(request.form.get("domain_id", ""))
-            machine_id = int(request.form.get("machine_id", ""))
-            domain = _owned_domain(domain_id)
-            _owned_machine(machine_id)
-            name = relative_name(request.form.get("name", ""), host_only=True)
-            hostname = fqdn(name, domain["name"]).rstrip(".")
-            port = int(request.form.get("port", ""))
-            if not 1 <= port <= 65535:
-                raise ValueError("Port invalide.")
-            db = get_db()
-            conflict_types = ("CNAME",) if name == "@" else ("A", "AAAA", "CNAME")
-            if db.execute(
-                f"SELECT 1 FROM records WHERE domain_id=? AND name=? AND type IN ({','.join('?' for _ in conflict_types)})",
-                (domain_id, name, *conflict_types),
-            ).fetchone():
-                raise ValueError("Un enregistrement DNS incompatible existe déjà pour ce nom.")
-            with db:
-                cursor = db.execute(
-                    "INSERT INTO addresses(domain_id,machine_id,hostname,port,protected,created_at,route_token) "
-                    "VALUES(?,?,?,?,?,?,?)",
-                    (domain_id, machine_id, hostname, port, int(bool(request.form.get("protected"))), now_iso(),
-                     secrets.token_hex(12)),
-                )
-                _sync_zone(app, db, domain)
-            try:
-                _sync_runtime(app)
-            except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
-                with db:
-                    db.execute("DELETE FROM addresses WHERE id=?", (cursor.lastrowid,))
-                    _sync_zone(app, db, domain)
-                _sync_runtime(app)
-                raise ValueError("Synchronisation Caddy échouée ; l'adresse a été annulée.")
-        except (ValueError, sqlite3.IntegrityError) as exc:
-            flash(str(exc), "error")
+            address = actions.create_address(
+                app, g.user["id"], request.form.get("domain_id", ""), request.form.get("machine_id", ""),
+                request.form.get("name", ""), request.form.get("port", ""), bool(request.form.get("protected")),
+            )
+        except actions.ActionError as exc:
+            _flash_error(exc)
             return redirect(url_for("dashboard"))
-        flash(f"Adresse {hostname} créée.", "success")
+        flash(f"Adresse {address['hostname']} créée.", "success")
         return redirect(url_for("dashboard"))
 
     @app.route("/addresses/<int:address_id>/access", methods=["GET", "POST"])
     @_login_required
     def address_access(address_id: int):
-        db = get_db()
-        address = db.execute(
-            "SELECT a.* FROM addresses a JOIN domains d ON d.id=a.domain_id "
-            "WHERE a.id=? AND d.user_id=?", (address_id, g.user["id"]),
-        ).fetchone()
-        if address is None or not address["protected"]:
+        try:
+            address, emails = actions.access_list(g.user["id"], address_id)
+        except actions.ActionError:
             abort(404)
         if request.method == "POST":
             try:
-                emails = _parse_grants(request.form.get("emails", ""))
-                shared = bool(request.form.get("shared"))
-                if shared and not emails:
-                    raise ValueError("Ajoute au moins une adresse mail pour activer l'accès partagé.")
-                with db:
-                    db.execute("UPDATE addresses SET shared=? WHERE id=?", (int(shared), address_id))
-                    db.execute("DELETE FROM address_grants WHERE address_id=?", (address_id,))
-                    if shared:
-                        db.executemany(
-                            "INSERT INTO address_grants(address_id,email) VALUES(?,?)",
-                            [(address_id, email) for email in emails],
-                        )
-                    # Les cookies et codes précédents sont révoqués à chaque changement.
-                    db.execute("DELETE FROM host_sessions WHERE hostname=?", (address["hostname"],))
-                    db.execute("DELETE FROM access_codes WHERE hostname=?", (address["hostname"],))
-            except ValueError as exc:
-                flash(str(exc), "error")
+                granted = actions.set_access(g.user["id"], address_id, bool(request.form.get("shared")),
+                                             request.form.get("emails", ""))
+            except actions.ActionError as exc:
+                _flash_error(exc)
             else:
-                flash(f"Accès mis à jour : {len(emails) if shared else 0} adresse(s) autorisée(s).", "success")
+                flash(f"Accès mis à jour : {len(granted)} adresse(s) autorisée(s).", "success")
             return redirect(url_for("address_access", address_id=address_id))
-        emails = [row[0] for row in db.execute(
-            "SELECT email FROM address_grants WHERE address_id=? ORDER BY email", (address_id,),
-        )]
         return render_template("address_access.html", address=address, emails=emails)
 
     @app.post("/addresses/<int:address_id>/delete")
     @_login_required
     def delete_address(address_id: int):
-        db = get_db()
-        row = db.execute(
-            "SELECT a.*, d.id AS domain_id, d.name AS domain_name FROM addresses a "
-            "JOIN domains d ON d.id=a.domain_id WHERE a.id=? AND d.user_id=?",
-            (address_id, g.user["id"]),
-        ).fetchone()
-        if row is None:
-            abort(404)
-        domain = {"id": row["domain_id"], "name": row["domain_name"]}
-        with db:
-            db.execute("DELETE FROM addresses WHERE id=?", (address_id,))
-            db.execute("DELETE FROM host_sessions WHERE hostname=?", (row["hostname"],))
-            _sync_zone(app, db, domain)
         try:
-            _sync_runtime(app)
+            actions.delete_address(app, g.user["id"], address_id)
+        except actions.ActionError as exc:
+            _flash_error(exc)
+        else:
             flash("Adresse supprimée.", "success")
-        except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
-            flash("Adresse retirée de la base et du DNS ; le contrôle d'accès bloque encore l'ancienne route. Relance la synchronisation Caddy.", "error")
         return redirect(url_for("dashboard"))
 
     def admin_required(fn):
