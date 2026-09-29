@@ -10,3 +10,5 @@ __pycache__/
 *.key
 *.conf.local
 coverage.xml
+.venv.new/
+.venv.prev/

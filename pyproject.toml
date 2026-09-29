@@ -9,7 +9,7 @@ dependencies = [
   "dnspython>=2.6,<3",
   "requests>=2.31,<3",
   "gunicorn>=22,<24",
-  "cryptography>=42,<47",
+  "cryptography>=50.0.1,<51",
   "segno>=1.6,<2",
 ]
 

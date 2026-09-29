@@ -96,6 +96,8 @@ uv sync --extra dev        # ou : python3 -m venv .venv && .venv/bin/pip install
 .venv/bin/pytest -q
 ```
 
+Après tout changement de dépendance : `uv lock`, puis `uv export --frozen --no-dev --no-emit-project --format requirements-txt -o requirements.lock`. L'installateur de production n'installe que `requirements.lock` (versions et empreintes figées, paquets binaires, sans outils de développement) ; un test vérifie que les deux fichiers concordent.
+
 Les tests unitaires n'ont besoin d'aucun service système. `scripts/e2e-test.py` déroule un essai complet (DNS, HTTPS, tunnel, pare-feu, adresse protégée) mais **modifie la configuration réelle** de la machine : il ne se lance que sur une machine jetable, avec `SYNUNNEL_E2E_DISPOSABLE=1`.
 
 Documentation : [architecture](docs/ARCHITECTURE.md), [sécurité et limites](docs/SECURITE.md), [API d'administration](docs/API-ADMIN.md), [historique des versions](CHANGELOG.md). Signaler une faille : [SECURITY.md](SECURITY.md).

@@ -272,14 +272,27 @@ chmod 0640 /etc/powerdns/pdns.d/synunnel.conf
 (
   # L'environnement Python doit rester lisible par le service et par les tests.
   umask 022
-  if [[ ! -d "$REPO_DIR/.venv" ]]; then
-    python3 -m venv "$REPO_DIR/.venv"
+  # Dépendances figées : versions et empreintes de requirements.lock (généré depuis uv.lock par
+  # `uv export --frozen --no-dev --no-emit-project`), paquets binaires seulement, sans outils de
+  # développement ni installation éditable. Un environnement neuf remplace l'ancien, gardé en .venv.prev.
+  VENV_NEW="$REPO_DIR/.venv.new"
+  if [[ -e "$VENV_NEW" ]]; then
+    python3 -c 'import shutil, sys; shutil.rmtree(sys.argv[1])' "$VENV_NEW"
   fi
-  if command -v uv >/dev/null 2>&1; then
-    uv pip install --python "$REPO_DIR/.venv/bin/python" -e "$REPO_DIR[dev]"
-  else
-    "$REPO_DIR/.venv/bin/python" -m pip install -e "$REPO_DIR[dev]"
+  python3 -m venv "$VENV_NEW"
+  "$VENV_NEW/bin/python" -m pip install --quiet --disable-pip-version-check --no-input \
+    --require-hashes --only-binary=:all: --no-deps -r "$REPO_DIR/requirements.lock"
+  # Le code de Synunnel est lu depuis le dépôt : un simple chemin, sans outil de construction téléchargé.
+  PURELIB="$("$VENV_NEW/bin/python" -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"
+  printf '%s\n' "$REPO_DIR" > "$PURELIB/synunnel-repo.pth"
+  (cd / && "$VENV_NEW/bin/python" -c 'import synunnel, cryptography, gunicorn') >/dev/null
+  if [[ -e "$REPO_DIR/.venv.prev" ]]; then
+    python3 -c 'import shutil, sys; shutil.rmtree(sys.argv[1])' "$REPO_DIR/.venv.prev"
   fi
+  if [[ -e "$REPO_DIR/.venv" ]]; then
+    mv "$REPO_DIR/.venv" "$REPO_DIR/.venv.prev"
+  fi
+  mv "$VENV_NEW" "$REPO_DIR/.venv"
 )
 
 install -o root -g root -m 0755 "$REPO_DIR/scripts/synunnel-sync.py" /usr/local/sbin/synunnel-sync

@@ -64,3 +64,24 @@ def test_csrf_is_required_for_every_method_except_safe_ones(app):
         assert response.status_code in {400, 405}, (method, response.status_code)
         if method == "POST":
             assert response.status_code == 400
+
+
+def test_dependencies_are_pinned_patched_and_installed_from_the_lock():
+    """Bloquant 3 : cryptography < 47 (7 avis connus) et installation hors verrou, outils de dev compris."""
+    import tomllib
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+    lock = {p["name"]: p["version"] for p in tomllib.loads((root / "uv.lock").read_text())["package"]}
+    pinned = dict(re.findall(r"^([A-Za-z0-9_.-]+)==([^\s\;]+)", (root / "requirements.lock").read_text(), re.MULTILINE))
+    assert pinned, "requirements.lock vide"
+    for name, version in pinned.items():
+        assert lock.get(name) == version, f"{name} : {version} dans requirements.lock, {lock.get(name)} dans uv.lock"
+    major, minor, patch = (int(x) for x in pinned["cryptography"].split(".")[:3])
+    assert (major, minor, patch) >= (50, 0, 1)
+    assert "--hash=sha256:" in (root / "requirements.lock").read_text()
+    for dev in ("pytest", "ruff"):
+        assert dev not in pinned
+    installer = (root / "scripts" / "install.sh").read_text()
+    assert "--require-hashes" in installer and "requirements.lock" in installer
+    assert "[dev]" not in installer and "install -e" not in installer

@@ -95,7 +95,7 @@
 - **Sauvegardes.** Aucune rotation ni restauration automatisée n'est fournie (voir le README).
 - **Docker sur le même VPS.** Docker insère ses propres règles de pare-feu et peut contourner UFW pour les ports qu'il publie. La table `synunnel_wg` reste active pour le tunnel.
 - **Droits sur le dépôt.** L'installateur ouvre la traversée des répertoires parents du dépôt à l'utilisateur `synunnel` quand ils ne sont pas déjà traversables par tous. Il refuse un répertoire qui porte d'autres ACL étendues, et ne retouche jamais une entrée `synunnel` posée par une installation précédente. Cloner dans `/opt/synunnel` évite toute modification de droits.
-- **Dépendances.** L'installation résout les versions compatibles au moment où elle est lancée ; `uv.lock` fige les versions testées pour le développement.
+- **Dépendances.** L'installation n'installe que `requirements.lock` : versions et empreintes SHA-256 figées depuis `uv.lock`, paquets binaires seulement, sans outils de développement. Un nouvel avis de sécurité demande donc une nouvelle version de Synunnel (`uv lock`, export, `pip-audit`) : l'instance ne se met pas à jour seule.
 - **Échelle.** SQLite et une seule instance applicative suffisent à un usage personnel, pas à une plateforme ouverte au public.
 
 ## Secrets et journaux
