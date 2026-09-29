@@ -500,8 +500,7 @@ def create_app(config_override: dict | None = None) -> Flask:
         except actions.ActionError as exc:
             _flash_error(exc)
             return redirect(url_for("domain_detail", domain_id=domain_id))
-        flash(f"Domaine {result['name']} supprimé. Sa zone reste servie par l'instance pendant 48 heures, le "
-              "temps que les résolveurs oublient l'ancienne délégation, puis elle est retirée." +
+        flash(f"Domaine {result['name']} supprimé, sa zone retirée du DNS de l'instance." +
               ("" if result["synced"] else PENDING), "success")
         return redirect(url_for("dashboard"))
 

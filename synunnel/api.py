@@ -331,9 +331,7 @@ def get_domain(domain_id: int):
 @endpoint("domains")
 def delete_domain(domain_id: int):
     result = _run(actions.delete_domain, current_app, g.api_token["user_id"], domain_id, _guard, _audit)
-    after = result["zone_removed_after"]
-    return jsonify({"deleted": True, "synced": result["synced"],
-                    "zone_removed_after": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(after)) if after else None})
+    return jsonify({"deleted": True, "synced": result["synced"]})
 
 
 @route("/domains/<int:domain_id>/records", methods=["POST"])

@@ -130,8 +130,7 @@ CREATE TABLE IF NOT EXISTS invitations (
 );
 CREATE TABLE IF NOT EXISTS zone_removals (
     name TEXT PRIMARY KEY,
-    at TEXT NOT NULL,
-    not_before INTEGER NOT NULL DEFAULT 0
+    at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS id_counters (
     name TEXT PRIMARY KEY,
@@ -326,9 +325,6 @@ def init_db() -> None:
     for column in ("delegation_active INTEGER", "delegation_ns TEXT", "delegation_checked_at INTEGER"):
         if column.split()[0] not in domain_columns:
             db.execute(f"ALTER TABLE domains ADD COLUMN {column}")
-    if "not_before" not in {row[1] for row in db.execute("PRAGMA table_info(zone_removals)")}:
-        # Retrait différé d'une zone supprimée (caches des résolveurs) ; les retraits déjà en attente sont dus.
-        db.execute("ALTER TABLE zone_removals ADD COLUMN not_before INTEGER NOT NULL DEFAULT 0")
     if "domain_id" not in {row[1] for row in db.execute("PRAGMA table_info(domain_claims)")}:
         db.execute("ALTER TABLE domain_claims ADD COLUMN domain_id INTEGER")
     for table in ("users", "access_codes", "host_sessions"):

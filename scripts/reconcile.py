@@ -51,9 +51,8 @@ def main() -> int:
         if not project_runtime(app):
             failures += 1
             print("Synchronisation WireGuard et Caddy en échec.", file=sys.stderr)
-        # 3. Zones de domaines supprimés dont le délai de retrait est passé, dans le budget.
-        due = db.execute("SELECT name FROM zone_removals WHERE not_before<=? ORDER BY at", (int(time.time()),))
-        for row in due.fetchall():
+        # 3. Zones de domaines supprimés, pas encore retirées de PowerDNS, dans le budget.
+        for row in db.execute("SELECT name FROM zone_removals ORDER BY at").fetchall():
             if time.monotonic() - started > BUDGET_SECONDS:
                 break
             if not remove_zone(app, row["name"]):
@@ -76,9 +75,7 @@ def main() -> int:
             refresh_delegation(app, domain)
         if app.config["PDNS_ENABLED"]:
             try:
-                # Une zone supprimée dont le retrait attend l'expiration des caches n'est pas orpheline.
-                kept = {row["name"] for row in db.execute("SELECT name FROM domains UNION SELECT name FROM zone_removals")}
-                orphans = _pdns(app).zone_names() - kept
+                orphans = _pdns(app).zone_names() - {row["name"] for row in db.execute("SELECT name FROM domains")}
             except requests.RequestException as exc:
                 failures += 1
                 print(f"Liste des zones PowerDNS indisponible : {exc}", file=sys.stderr)
