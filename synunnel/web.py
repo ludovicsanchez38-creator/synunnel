@@ -6,7 +6,7 @@ import os
 import secrets
 import time
 from functools import wraps
-from urllib.parse import quote, urlsplit
+from urllib.parse import quote
 
 from flask import (
     Flask,
@@ -24,7 +24,7 @@ from flask import (
 from flask.sessions import SecureCookieSessionInterface
 from werkzeug.middleware.proxy_fix import ProxyFix
 
-from . import VERSION_LABEL, account, actions, api, security
+from . import VERSION_LABEL, account, actions, api, guest, security
 from .account import PASSWORDS
 from .db import allocate_id, close_db, get_db, init_db, now_iso
 from .dns import (
@@ -98,23 +98,11 @@ def _authorized_protected_user(hostname: str, user_id: int) -> bool:
 
 
 def _validate_next(value: str, user_id: int) -> tuple[str, str] | None:
-    try:
-        parsed = urlsplit(value)
-        if parsed.scheme != "https" or not parsed.hostname or parsed.port or parsed.username:
-            return None
-        hostname = parsed.hostname.lower()
-        if parsed.fragment:
-            return None
-        if not _authorized_protected_user(hostname, user_id):
-            return None
-        path = parsed.path or "/"
-        if not path.startswith("/") or path.startswith("//"):
-            return None
-        if parsed.query:
-            path += "?" + parsed.query
-        return hostname, path
-    except ValueError:
+    # Syntaxe stricte commune aux deux voies (compte, invité), puis autorisation propre au compte.
+    target = guest.parse_next(value)
+    if target is None or not _authorized_protected_user(target[0], user_id):
         return None
+    return target
 
 
 def _redirect_after_login(next_url: str, user_id: int):
@@ -179,6 +167,10 @@ def create_app(config_override: dict | None = None) -> Flask:
         # Clé dédiée au chiffrement des secrets TOTP (64 caractères hexadécimaux), distincte de SECRET_KEY.
         TOTP_KEY=os.getenv("TOTP_KEY", ""),
         REQUIRE_2FA=os.getenv("REQUIRE_2FA", "0") == "1",
+        # Accès invité par code mail : possible par défaut (option par adresse, désactivée), coupé si la
+        # 2FA est exigée, sauf choix explicite GUEST_CODES_WITH_2FA=1.
+        GUEST_CODES=os.getenv("GUEST_CODES", "1") == "1",
+        GUEST_CODES_WITH_2FA=os.getenv("GUEST_CODES_WITH_2FA", "0") == "1",
         SMTP_HOST=os.getenv("SMTP_HOST", ""),
         SMTP_PORT=os.getenv("SMTP_PORT", "465"),
         SMTP_USER=os.getenv("SMTP_USER", ""),
@@ -223,6 +215,11 @@ def create_app(config_override: dict | None = None) -> Flask:
     def before_request():
         g.user = None
         g.enrolling = None
+        hostname = request.host.split(":", 1)[0].lower()
+        if (hostname != app.config["DASHBOARD_HOST"] and not request.path.startswith(("/__synunnel/", "/internal/caddy/"))
+                and get_db().execute("SELECT 1 FROM addresses WHERE hostname=?", (hostname,)).fetchone()):
+            # Une adresse publiée n'atteint l'application que par ses chemins réservés.
+            abort(404)
         if request.path.startswith("/api/"):
             # L'API s'authentifie par jeton uniquement : ni cookie ni jeton CSRF ici.
             return
@@ -246,7 +243,9 @@ def create_app(config_override: dict | None = None) -> Flask:
                 g.user = row
             if row is None:
                 session.clear()
-        mutating = request.method in {"POST", "PUT", "PATCH", "DELETE"} and not request.path.startswith("/admin/api/")
+        # /admin/api/ s'authentifie par jeton ; /__synunnel/ (hôtes publiés) porte son propre jeton de formulaire.
+        mutating = (request.method in {"POST", "PUT", "PATCH", "DELETE"}
+                    and not request.path.startswith(("/admin/api/", "/__synunnel/")))
         if mutating and not _same_secret(session.get("csrf", ""), request.form.get("csrf_token", "")):
             abort(400, "Jeton CSRF manquant ou invalide.")
 
@@ -335,7 +334,7 @@ def create_app(config_override: dict | None = None) -> Flask:
         if request.method == "GET":
             if g.user:
                 return _redirect_after_login(next_url, g.user["id"])
-            return render_template("login.html", next_url=next_url)
+            return render_template("login.html", next_url=next_url, guest_codes=guest.offers_codes(next_url))
         email = request.form.get("email", "").strip().lower()[:254]
         ip = _client_ip()
         # Seuls les échecs comptent, par adresse et par couple adresse-compte : un tiers qui se trompe
@@ -525,14 +524,17 @@ def create_app(config_override: dict | None = None) -> Flask:
             abort(404)
         if request.method == "POST":
             try:
+                # Case absente quand l'instance ne permet pas l'accès invité : l'option garde sa valeur.
+                option = bool(request.form.get("guest_codes")) if guest.instance_allows() else None
                 granted = actions.set_access(g.user["id"], address_id, bool(request.form.get("shared")),
-                                             request.form.get("emails", ""), guard=_web_guard)
+                                             request.form.get("emails", ""), guest_codes=option, guard=_web_guard)
             except actions.ActionError as exc:
                 _flash_error(exc)
             else:
                 flash(f"Accès mis à jour : {len(granted)} adresse(s) autorisée(s).", "success")
             return redirect(url_for("address_access", address_id=address_id))
-        return render_template("address_access.html", address=address, emails=emails)
+        return render_template("address_access.html", address=address, emails=emails,
+                               guest_available=guest.instance_allows())
 
     @app.post("/addresses/<int:address_id>/delete")
     @_login_required
@@ -795,6 +797,9 @@ def create_app(config_override: dict | None = None) -> Flask:
             # Nouvelle version des justificatifs : jetons d'API, tickets et liens émis avant la
             # suspension restent morts même après une réapprobation.
             account.invalidate_credentials(db, user_id)
+            # Accès invités de ses adresses : une réapprobation ne les ressuscite pas.
+            db.execute("UPDATE addresses SET guest_version=guest_version+1 WHERE domain_id IN "
+                       "(SELECT id FROM domains WHERE user_id=?)", (user_id,))
             account.record_event(db, user_id, "account.suspend", actor="admin")
         # Routes et pairs du compte disparaissent de Caddy et de WireGuard à la synchronisation.
         synced = actions.project_runtime(app)
@@ -840,6 +845,8 @@ def create_app(config_override: dict | None = None) -> Flask:
             ).fetchone()
             if found and _authorized_protected_user(hostname, found["user_id"]):
                 return "", 204
+            if guest.session_allows(get_db(), token, hostname, route):
+                return "", 204
         original = request.headers.get("X-Forwarded-Uri", "/")
         if not original.startswith("/") or original.startswith("//"):
             original = "/"
@@ -860,7 +867,17 @@ def create_app(config_override: dict | None = None) -> Flask:
             f"AND {policy} WHERE c.code_hash=? AND c.hostname=? AND c.expires_at>?",
             (*params, _hash_token(code), hostname, int(time.time())),
         ).fetchone()
-        if row is None or not _authorized_protected_user(hostname, row["user_id"]):
+        if row is None:
+            exchanged = guest.exchange_transfer_code(db, code, hostname)
+            if exchanged is None:
+                abort(403)
+            token, next_path = exchanged
+            response = redirect(next_path)
+            response.set_cookie(ACCESS_COOKIE, token, secure=True, httponly=True, samesite="Lax", max_age=43200,
+                                path="/")
+            response.headers["Cache-Control"] = "no-store"
+            return response
+        if not _authorized_protected_user(hostname, row["user_id"]):
             abort(403)
         token = secrets.token_urlsafe(32)
         with db:
@@ -878,4 +895,5 @@ def create_app(config_override: dict | None = None) -> Flask:
         return response
 
     account.register(app, _redirect_after_login)
+    guest.register(app)
     return app

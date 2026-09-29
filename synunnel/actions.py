@@ -732,8 +732,9 @@ def access_list(user_id: int, address_id: int) -> tuple:
     return address, emails
 
 
-def set_access(user_id: int, address_id: int, shared: bool, emails_raw, guard: Guard = None,
-               audit: Callable | None = None) -> list[str]:
+def set_access(user_id: int, address_id: int, shared: bool, emails_raw, guest_codes: bool | None = None,
+               guard: Guard = None, audit: Callable | None = None) -> list[str]:
+    """`guest_codes` : accès invité par code mail ; None garde la valeur actuelle."""
     emails = parse_grants(emails_raw)
     if shared and not emails:
         raise _invalid("Ajoute au moins une adresse mail pour activer l'accès partagé.")
@@ -741,11 +742,16 @@ def set_access(user_id: int, address_id: int, shared: bool, emails_raw, guard: G
     with db:
         _begin(db, guard)
         address = protected_address(user_id, address_id)
+        option = int(bool(address["guest_codes"] if guest_codes is None else guest_codes))
         current = [row[0] for row in db.execute(
             "SELECT email FROM address_grants WHERE address_id=? ORDER BY email", (address_id,))]
-        if bool(address["shared"]) == bool(shared) and current == (emails if shared else current):
+        if (bool(address["shared"]) == bool(shared) and current == (emails if shared else current)
+                and option == address["guest_codes"]):
             return emails if shared else []
-        db.execute("UPDATE addresses SET shared=? WHERE id=?", (int(bool(shared)), address_id))
+        # Tout changement de liste, de partage ou d'option change la version invitée de l'adresse :
+        # challenges, codes et sessions d'invités antérieurs ne valent plus rien.
+        db.execute("UPDATE addresses SET shared=?, guest_codes=?, guest_version=guest_version+1 WHERE id=?",
+                   (int(bool(shared)), option, address_id))
         db.execute("DELETE FROM address_grants WHERE address_id=?", (address_id,))
         if shared:
             db.executemany("INSERT INTO address_grants(address_id,email) VALUES(?,?)",
@@ -753,7 +759,9 @@ def set_access(user_id: int, address_id: int, shared: bool, emails_raw, guard: G
         # Les cookies et codes précédents sont révoqués à chaque changement.
         db.execute("DELETE FROM host_sessions WHERE hostname=?", (address["hostname"],))
         db.execute("DELETE FROM access_codes WHERE hostname=?", (address["hostname"],))
+        for table in ("guest_challenges", "guest_access_codes", "guest_host_sessions"):
+            db.execute(f"DELETE FROM {table} WHERE address_id=?", (address_id,))
         if audit:
             audit(db, "access.update", f"address:{address_id} {address['hostname']} "
-                                       f"shared={int(bool(shared))} {len(emails)} adresse(s)")
+                                       f"shared={int(bool(shared))} {len(emails)} adresse(s) invités={option}")
     return emails if shared else []

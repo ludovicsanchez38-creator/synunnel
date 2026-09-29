@@ -63,7 +63,9 @@ CREATE TABLE IF NOT EXISTS addresses (
     protected INTEGER NOT NULL DEFAULT 0,
     shared INTEGER NOT NULL DEFAULT 0 CHECK(shared IN (0, 1)),
     created_at TEXT NOT NULL,
-    route_token TEXT NOT NULL DEFAULT (lower(hex(randomblob(12))))
+    route_token TEXT NOT NULL DEFAULT (lower(hex(randomblob(12)))),
+    guest_codes INTEGER NOT NULL DEFAULT 0 CHECK(guest_codes IN (0, 1)),
+    guest_version INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_addresses_host ON addresses(hostname);
 CREATE TABLE IF NOT EXISTS address_grants (
@@ -190,6 +192,48 @@ CREATE TABLE IF NOT EXISTS security_events (
     ip TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_security_events_at ON security_events(at);
+CREATE TABLE IF NOT EXISTS guest_challenges (
+    challenge_hash TEXT PRIMARY KEY,
+    address_id INTEGER NOT NULL REFERENCES addresses(id) ON DELETE CASCADE,
+    email TEXT NOT NULL,
+    route_token TEXT NOT NULL,
+    guest_version INTEGER NOT NULL,
+    next_path TEXT NOT NULL,
+    mac TEXT NOT NULL,
+    dummy INTEGER NOT NULL CHECK(dummy IN (0, 1)),
+    attempts INTEGER NOT NULL DEFAULT 0,
+    created_at INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL,
+    used_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_guest_challenges_couple ON guest_challenges(address_id, email);
+CREATE INDEX IF NOT EXISTS idx_guest_challenges_expiry ON guest_challenges(expires_at);
+CREATE TABLE IF NOT EXISTS guest_access_codes (
+    code_hash TEXT PRIMARY KEY,
+    address_id INTEGER NOT NULL REFERENCES addresses(id) ON DELETE CASCADE,
+    email TEXT NOT NULL,
+    route_token TEXT NOT NULL,
+    guest_version INTEGER NOT NULL,
+    next_path TEXT NOT NULL,
+    expires_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS guest_host_sessions (
+    token_hash TEXT PRIMARY KEY,
+    address_id INTEGER NOT NULL REFERENCES addresses(id) ON DELETE CASCADE,
+    email TEXT NOT NULL,
+    route_token TEXT NOT NULL,
+    guest_version INTEGER NOT NULL,
+    hostname TEXT NOT NULL,
+    expires_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_guest_host_sessions_host ON guest_host_sessions(hostname);
+CREATE TABLE IF NOT EXISTS guest_quota (
+    id INTEGER PRIMARY KEY,
+    kind TEXT NOT NULL,
+    key TEXT NOT NULL,
+    at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_guest_quota ON guest_quota(kind, key, at);
 CREATE TABLE IF NOT EXISTS admin_audit (
     id INTEGER PRIMARY KEY,
     at TEXT NOT NULL,
@@ -262,6 +306,11 @@ def init_db() -> None:
     address_columns = {row[1] for row in db.execute("PRAGMA table_info(addresses)")}
     if "shared" not in address_columns:
         db.execute("ALTER TABLE addresses ADD COLUMN shared INTEGER NOT NULL DEFAULT 0 CHECK(shared IN (0, 1))")
+    for column in ("guest_codes INTEGER NOT NULL DEFAULT 0 CHECK(guest_codes IN (0, 1))",
+                   "guest_version INTEGER NOT NULL DEFAULT 0"):
+        # Accès invité désactivé par défaut, y compris pour les adresses existantes.
+        if column.split()[0] not in address_columns:
+            db.execute(f"ALTER TABLE addresses ADD COLUMN {column}")
     if "route_token" not in address_columns:
         # Chaque incarnation d'une adresse porte son propre jeton : une ancienne route encore
         # chargée dans Caddy ne peut pas être réautorisée par une adresse recréée au même nom.

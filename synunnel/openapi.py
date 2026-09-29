@@ -179,12 +179,18 @@ def document(app: Flask) -> dict:
             "/addresses/{address_id}/access": {
                 "get": {**_op("Liste d'accès d'une adresse protégée", None, {"200": _json(
                     {"type": "object"}, "Accès")}, 404), "parameters": ids("address_id")},
-                "put": {**_op("Remplacer la liste d'accès (comptes approuvés, 100 adresses mail au plus)", "sharing",
-                              {"200": _json({"type": "object"}, "Accès enregistrés")}, 403, 404, 415, 422,
+                "put": {**_op("Remplacer la liste d'accès (100 adresses mail au plus) et l'option d'accès invité",
+                              "sharing", {"200": _json({"type": "object"}, "Accès enregistrés")}, 403, 404, 409, 415,
+                              422,
                               body={"type": "object", "additionalProperties": False, "required": ["shared", "emails"],
                                     "properties": {"shared": {"type": "boolean"},
                                                    "emails": {"type": "array", "items": {"type": "string"},
-                                                              "maxItems": 100}}}),
+                                                              "maxItems": 100},
+                                                   "guest_codes": {"type": "boolean", "description":
+                                                       "true : les personnes de la liste sans compte reçoivent un "
+                                                       "code à 6 chiffres par mail pour entrer (un seul facteur). "
+                                                       "Absent : l'option garde sa valeur. 409 si l'instance ne "
+                                                       "le propose pas."}}}),
                         "parameters": ids("address_id")},
             },
         },

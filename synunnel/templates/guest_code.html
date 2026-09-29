@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% block title %}Recevoir un code d'accès{% endblock %}
+{% block content %}
+<section class="auth-layout">
+  <div class="intro"><span class="eyebrow">Accès invité</span><h1>Recevoir un code par mail</h1><p>Si ton adresse fait partie des personnes invitées sur ce service, un code à 6 chiffres y part. Il est valable 10 minutes.</p><p class="muted">Tu as un compte Synunnel ? <a href="{{ url_for('login', next=next_url) }}">Connecte-toi plutôt</a>.</p></div>
+  <div class="card auth-card"><h2>Ton adresse</h2>
+    <form method="post" action="{{ url_for('guest_code') }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}"><input type="hidden" name="next" value="{{ next_url }}">
+      <label>Adresse mail<input type="email" name="email" autocomplete="email" required autofocus></label>
+      <button class="button" type="submit">Recevoir le code</button>
+    </form>
+  </div>
+</section>
+{% endblock %}

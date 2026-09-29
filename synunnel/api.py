@@ -416,16 +416,22 @@ def delete_address(address_id: int):
 @endpoint()
 def get_access(address_id: int):
     address, emails = _run(actions.access_list, g.api_token["user_id"], address_id)
-    return jsonify({"shared": bool(address["shared"]), "emails": emails if address["shared"] else []})
+    return jsonify({"shared": bool(address["shared"]), "emails": emails if address["shared"] else [],
+                    "guest_codes": bool(address["guest_codes"])})
 
 
 @route("/addresses/<int:address_id>/access", methods=["PUT"])
 @endpoint("sharing")
 def put_access(address_id: int):
-    data = _payload({"shared": bool, "emails": list}, {"shared", "emails"})
+    from . import guest
+    data = _payload({"shared": bool, "emails": list, "guest_codes": bool}, {"shared", "emails"})
+    option = data.get("guest_codes")
+    if option and not guest.instance_allows():
+        raise ApiError(409, "unavailable", "Cette instance ne propose pas l'accès invité par code mail.")
     emails = _run(actions.set_access, g.api_token["user_id"], address_id, data["shared"], data["emails"],
-                  _guard, _audit)
-    return jsonify({"shared": data["shared"], "emails": emails})
+                  option, _guard, _audit)
+    address, _emails = _run(actions.access_list, g.api_token["user_id"], address_id)
+    return jsonify({"shared": data["shared"], "emails": emails, "guest_codes": bool(address["guest_codes"])})
 
 
 @route("/openapi.json", methods=["GET"])

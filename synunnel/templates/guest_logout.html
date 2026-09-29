@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sortir de {{ hostname }} · Synunnel</title>
+  <link rel="stylesheet" href="/__synunnel/site.css">
+</head>
+<body>
+  <main class="shell">
+    <section class="page-head"><span class="eyebrow">Synunnel</span><h1>{% if done %}Tu es sorti de {{ hostname }}{% else %}Sortir de {{ hostname }}{% endif %}</h1>
+      {% if done %}<p>Ton accès à ce service est fermé sur ce navigateur.</p>
+      {% elif active %}<p>Ton accès à ce service sera fermé sur ce navigateur.</p>
+        {% if refused %}<p class="notice error">Demande refusée : recharge la page et recommence.</p>{% endif %}
+        <form method="post" action="/__synunnel/logout"><input type="hidden" name="csrf_token" value="{{ form_token }}"><button class="button" type="submit">Sortir</button></form>
+      {% else %}<p>Aucun accès ouvert sur ce navigateur.</p>{% endif %}
+    </section>
+  </main>
+</body>
+</html>

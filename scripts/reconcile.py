@@ -43,6 +43,10 @@ def main() -> int:
             db.execute("DELETE FROM password_resets WHERE expires_at < ?", (now - 86400,))
             db.execute("DELETE FROM email_verifications WHERE expires_at < ?", (now - 86400,))
             db.execute("DELETE FROM security_events WHERE at < strftime('%Y-%m-%dT%H:%M:%S', 'now', '-365 days')")
+            db.execute("DELETE FROM guest_challenges WHERE expires_at < ?", (now - 86400,))
+            db.execute("DELETE FROM guest_access_codes WHERE expires_at < ?", (now,))
+            db.execute("DELETE FROM guest_host_sessions WHERE expires_at < ?", (now,))
+            db.execute("DELETE FROM guest_quota WHERE at < ?", (now - 2 * 86400,))
         # 2. Tunnel et routes : rapides, et indépendants de PowerDNS.
         if not project_runtime(app):
             failures += 1

@@ -1,12 +1,14 @@
 {% extends "base.html" %}
 {% block title %}Accès à {{ address.hostname }}{% endblock %}
 {% block content %}
-<section class="page-head"><a class="back" href="{{ url_for('dashboard') }}">← Tableau de bord</a><span class="eyebrow">Accès à l'adresse</span><h1>{{ address.hostname }}</h1><p>Vous gardez toujours l'accès. Les personnes ajoutées doivent posséder un compte Synunnel approuvé par l'administrateur. Retirer une adresse coupe son accès dès la requête suivante.</p></section>
+<section class="page-head"><a class="back" href="{{ url_for('dashboard') }}">← Tableau de bord</a><span class="eyebrow">Accès à l'adresse</span><h1>{{ address.hostname }}</h1><p>Vous gardez toujours l'accès. Les personnes ajoutées entrent avec leur compte Synunnel, ou par un code reçu par mail si tu l'actives. Retirer une adresse coupe son accès dès la requête suivante.</p></section>
 <section class="card access-card"><h2>Partage</h2><form method="post">
   <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
   <label class="check"><input type="checkbox" name="shared" value="1" {% if address.shared %}checked{% endif %}><span>Activer l'accès partagé</span></label>
   <label>Adresses mail autorisées <span class="hint">une par ligne ou séparées par une virgule</span><textarea name="emails" rows="7" autocomplete="off" spellcheck="false" placeholder="associe@exemple.fr">{{ emails|join('\n') }}</textarea></label>
-  <p class="small">Aucune invitation n'est envoyée. Chaque personne s'inscrit elle-même et attend la validation de l'administrateur.</p>
+  {% if guest_available %}<label class="check"><input type="checkbox" name="guest_codes" value="1" {% if address.guest_codes %}checked{% endif %}><span>Accès par code mail pour ces personnes, sans compte</span></label>
+  <p class="small">Chaque personne de la liste reçoit un code à 6 chiffres par mail. Un seul facteur : réserve-le aux services qui le supportent. Les personnes qui ont un compte Synunnel passent toujours par leur compte.</p>{% endif %}
+  <p class="small">Sans accès par code, aucune invitation n'est envoyée : chaque personne se connecte avec son compte Synunnel.</p>
   <button class="button" type="submit">Enregistrer les accès</button>
 </form></section>
 {% endblock %}
