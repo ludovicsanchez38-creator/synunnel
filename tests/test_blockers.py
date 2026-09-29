@@ -139,3 +139,56 @@ def test_totp_secret_sealed_with_cryptography_46_still_opens_after_the_upgrade()
 
     sealed_by_46 = "v1:AAECAwQFBgcICQoLItGFJ06VAswtiOKt95vCEP6ZOVjlAmxBE+9+WY2EorzBB9uw"
     assert security.decrypt_secret(bytes.fromhex("11" * 32), 42, sealed_by_46) == b"12345678901234567890"
+
+
+def _zone_removals(app) -> int:
+    from synunnel.db import get_db
+    with app.app_context():
+        return get_db().execute("SELECT COUNT(*) FROM zone_removals").fetchone()[0]
+
+
+def _domain_exists(app, domain_id: int) -> bool:
+    from synunnel.db import get_db
+    with app.app_context():
+        return get_db().execute("SELECT 1 FROM domains WHERE id=?", (domain_id,)).fetchone() is not None
+
+
+def test_delegated_domain_cannot_be_deleted_and_deletion_needs_the_retyped_name(app, monkeypatch):
+    """Bloquant 5 : un domaine encore délégué se supprimait en un clic, site et messagerie coupés."""
+    from test_app import csrf
+
+    client = app.test_client()
+    register_approve_login(app, client, "suppr@example.org")
+    domain_id = add_domain(client, "suppr.example")
+    page = client.get(f"/domains/{domain_id}").data.decode()
+    assert f'/domains/{domain_id}/delete"' in page and 'method="post" action="/domains/' + str(domain_id) + '/delete"' not in page
+    confirm = client.get(f"/domains/{domain_id}/delete")
+    assert confirm.status_code == 200 and b'name="confirm_name"' in confirm.data
+    for state, code in ((True, "encore délégué"), (None, "Impossible de vérifier")):
+        monkeypatch.setattr("synunnel.actions.delegation_status", lambda domain, ns, state=state: (state, []))
+        response = client.post(f"/domains/{domain_id}/delete", data={"csrf_token": csrf(client),
+                                                                   "confirm_name": "suppr.example"})
+        assert response.status_code == 302 and _domain_exists(app, domain_id)
+        assert code in client.get(response.headers["Location"]).data.decode()
+    assert _zone_removals(app) == 0
+    monkeypatch.setattr("synunnel.actions.delegation_status", lambda domain, ns: (False, []))
+    wrong = client.post(f"/domains/{domain_id}/delete", data={"csrf_token": csrf(client), "confirm_name": "autre.example"})
+    assert wrong.status_code == 302 and _domain_exists(app, domain_id)
+    done = client.post(f"/domains/{domain_id}/delete", data={"csrf_token": csrf(client), "confirm_name": "Suppr.Example."})
+    assert done.status_code == 302 and not _domain_exists(app, domain_id)
+
+
+def test_api_refuses_to_delete_a_delegated_domain(app, monkeypatch):
+    from test_api import bearer, create_token
+
+    client = app.test_client()
+    register_approve_login(app, client, "api-suppr@example.org")
+    domain_id = add_domain(client, "api-suppr.example")
+    token = create_token(client)
+    monkeypatch.setattr("synunnel.actions.delegation_status", lambda domain, ns: (True, ["ns1.synunnel.fr."]))
+    refused = client.delete(f"/api/v1/domains/{domain_id}", headers=bearer(token))
+    assert refused.status_code == 409 and refused.json["error"]["code"] == "delegation_active"
+    assert _domain_exists(app, domain_id) and _zone_removals(app) == 0
+    monkeypatch.setattr("synunnel.actions.delegation_status", lambda domain, ns: (False, []))
+    assert client.delete(f"/api/v1/domains/{domain_id}", headers=bearer(token)).status_code == 200
+    assert not _domain_exists(app, domain_id)

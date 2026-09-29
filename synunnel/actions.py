@@ -555,8 +555,16 @@ def remove_zone(app: Flask, name: str) -> bool:
 
 def delete_domain(app: Flask, user_id: int | None, domain_id: int, guard: Guard = None,
                   audit: Callable | None = None, force: bool = False) -> dict:
-    """Supprime un domaine et sa zone. Le propriétaire doit d'abord retirer ses adresses ; l'administrateur
-    (user_id None, force) les retire avec lui, par exemple pour rendre un domaine à son vrai titulaire."""
+    """Supprime un domaine et sa zone. Le propriétaire doit d'abord retirer ses adresses et rendre la
+    délégation à son hébergeur ; l'administrateur (user_id None, force) passe outre, par exemple pour
+    rendre un domaine à son vrai titulaire."""
+    if not force:
+        # Relevé de délégation à jour, hors verrou (requêtes DNS) : tant que la zone parente désigne encore
+        # l'instance, retirer la zone couperait le domaine entier, site et messagerie compris.
+        current = (owned_domain(user_id, domain_id) if user_id is not None else
+                   get_db().execute("SELECT * FROM domains WHERE id=?", (domain_id,)).fetchone())
+        if current is not None:
+            refresh_delegation(app, current)
     db = get_db()
     with db:
         _begin(db, guard)
@@ -568,6 +576,14 @@ def delete_domain(app: Flask, user_id: int | None, domain_id: int, guard: Guard 
             domain = owned_domain(user_id, domain_id)
         if not force and db.execute("SELECT 1 FROM addresses WHERE domain_id=?", (domain_id,)).fetchone():
             raise ActionError(409, "in_use", "Supprime d'abord les adresses de ce domaine.")
+        if not force and domain["delegation_active"] is None:
+            raise ActionError(409, "delegation_unknown",
+                              "Impossible de vérifier la délégation du domaine pour l'instant : réessaie dans "
+                              "quelques minutes.")
+        if not force and domain["delegation_active"]:
+            raise ActionError(409, "delegation_active",
+                              "Ce domaine est encore délégué à cette instance : remets d'abord les serveurs de noms "
+                              "de ton hébergeur chez ton registrar, puis réessaie une fois la délégation retirée.")
         hostnames = [row[0] for row in db.execute("SELECT hostname FROM addresses WHERE domain_id=?", (domain_id,))]
         for hostname in hostnames:
             db.execute("DELETE FROM host_sessions WHERE hostname=?", (hostname,))

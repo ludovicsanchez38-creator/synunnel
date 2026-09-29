@@ -105,7 +105,7 @@ def document(app: Flask) -> dict:
             "/domains/{domain_id}": {
                 "get": {**_op("Domaine et ses enregistrements", None, {"200": _json(
                     {"type": "object"}, "Domaine")}, 404), "parameters": ids("domain_id")},
-                "delete": {**_op("Supprimer un domaine sans adresse (sa zone est retirée du DNS de l'instance)",
+                "delete": {**_op("Supprimer un domaine sans adresse et qui n'est plus délégué à l'instance (sinon 409 in_use, delegation_active ou delegation_unknown) ; sa zone est retirée du DNS de l'instance",
                                  "domains", {"200": _json({"type": "object"}, "Supprimé")}, 404, 409),
                            "parameters": ids("domain_id")},
             },

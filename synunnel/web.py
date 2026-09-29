@@ -462,9 +462,19 @@ def create_app(config_override: dict | None = None) -> Flask:
             flash("Enregistrement ajouté.", "success")
         return redirect(url_for("domain_detail", domain_id=domain_id))
 
-    @app.post("/domains/<int:domain_id>/delete")
+    @app.route("/domains/<int:domain_id>/delete", methods=["GET", "POST"])
     @_login_required
     def delete_domain(domain_id: int):
+        try:
+            domain = actions.owned_domain(g.user["id"], domain_id)
+        except actions.ActionError:
+            abort(404)
+        if request.method != "POST":
+            return render_template("domain_delete.html", domain=domain)
+        # Confirmation sans JavaScript : le nom du domaine, retapé.
+        if request.form.get("confirm_name", "").strip().lower().rstrip(".") != domain["name"]:
+            flash("Le nom retapé ne correspond pas au domaine : rien n'a été supprimé.", "error")
+            return redirect(url_for("delete_domain", domain_id=domain_id))
         try:
             result = actions.delete_domain(app, g.user["id"], domain_id, guard=_web_guard)
         except actions.ActionError as exc:
