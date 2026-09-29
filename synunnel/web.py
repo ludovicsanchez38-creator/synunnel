@@ -112,6 +112,9 @@ def _redirect_after_login(next_url: str, user_id: int):
     if target is None:
         return redirect(url_for("dashboard"))
     hostname, path = target
+    if request.method == "HEAD":
+        # Une sonde (vérificateur de liens, aperçu) ne reçoit ni n'émet de code d'accès.
+        return redirect(url_for("dashboard"))
     code = secrets.token_urlsafe(32)
     db = get_db()
     # Le code porte la version de session qui l'a émis : une déconnexion survenue pendant
@@ -899,6 +902,9 @@ def create_app(config_override: dict | None = None) -> Flask:
 
     @app.get("/__synunnel/auth/callback")
     def access_callback():
+        if request.method == "HEAD":
+            # Le code est à usage unique : une sonde HEAD ne doit ni le consommer ni ouvrir de session.
+            return "", 200, {"Cache-Control": "no-store"}
         hostname = request.host.split(":", 1)[0].lower()
         code = request.args.get("code", "")
         if not code or len(code) > 128:
