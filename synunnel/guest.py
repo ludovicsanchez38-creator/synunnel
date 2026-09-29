@@ -186,7 +186,7 @@ def register(app: Flask) -> None:
 
     @app.route("/access/code", methods=["GET", "POST"])
     def guest_code():
-        if request.method == "GET":
+        if request.method != "POST":
             return form_page(request.args.get("next", "")[:2000])
         if not reserve("req_ip", client_ip(), *REQUESTS_PER_IP):
             abort(429, "Trop de demandes. Réessaie plus tard.")
@@ -236,7 +236,7 @@ def register(app: Flask) -> None:
 
     @app.route("/access/verify", methods=["GET", "POST"])
     def guest_verify():
-        if request.method == "GET":
+        if request.method != "POST":
             return no_store(render_template("guest_verify.html"))
         if not reserve("verify_ip", client_ip(), *VERIFY_PER_IP):
             abort(429, "Trop de tentatives. Réessaie plus tard.")
@@ -300,7 +300,7 @@ def register(app: Flask) -> None:
     def guest_logout():
         hostname = request.host.split(":", 1)[0].lower()
         cookie = request.cookies.get(COOKIE, "")
-        if request.method == "GET":
+        if request.method != "POST":
             return no_store(render_template("guest_logout.html", hostname=hostname, active=bool(cookie),
                                             form_token=logout_token(cookie) if cookie else ""))
         if not cookie or not hmac.compare_digest(request.form.get("csrf_token", ""), logout_token(cookie)):

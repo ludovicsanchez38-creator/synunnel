@@ -495,7 +495,7 @@ def register(app: Flask, redirect_after_login) -> None:
 
     @app.route("/security/email/confirm", methods=["GET", "POST"])
     def email_verify_confirm():
-        if request.method == "GET":
+        if request.method != "POST":
             return no_store(render_template("email_confirm.html", token=request.args.get("token", "")[:200]))
         slot = reserve_or_429("verify_ip", client_ip(), 10, 900)
         value = request.form.get("token", "")
@@ -523,7 +523,7 @@ def register(app: Flask, redirect_after_login) -> None:
 
     @app.route("/forgot", methods=["GET", "POST"])
     def forgot():
-        if request.method == "GET":
+        if request.method != "POST":
             return no_store(render_template("forgot.html", mail_enabled=mailer().enabled))
         reserve_or_429("forgot_ip", client_ip(), 5, 3600)
         email = request.form.get("email", "").strip().lower()[:254]
@@ -566,7 +566,7 @@ def register(app: Flask, redirect_after_login) -> None:
 
     @app.route("/reset", methods=["GET", "POST"])
     def reset_password():
-        if request.method == "GET":
+        if request.method != "POST":
             return no_store(render_template("reset.html", token=request.args.get("token", "")[:200]))
         slot = reserve_or_429("reset_ip", client_ip(), 10, 900)
         value = request.form.get("token", "")
@@ -578,7 +578,7 @@ def register(app: Flask, redirect_after_login) -> None:
 
     @app.route("/recover", methods=["GET", "POST"])
     def recover():
-        if request.method == "GET":
+        if request.method != "POST":
             return no_store(render_template("recover.html", token=""))
         slot = reserve_or_429("recover_ip", client_ip(), 10, 900)
         return consume_ticket("admin", request.form.get("ticket", "").strip(),
@@ -637,7 +637,7 @@ def register(app: Flask, redirect_after_login) -> None:
         value = session.get("challenge")
         if not value:
             return redirect(url_for("login"))
-        if request.method == "GET":
+        if request.method != "POST":
             return no_store(render_template("login_2fa.html"))
         now = int(_now())
         db = get_db()

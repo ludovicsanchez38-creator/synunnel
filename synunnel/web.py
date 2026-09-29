@@ -246,7 +246,9 @@ def create_app(config_override: dict | None = None) -> Flask:
             if row is None:
                 session.clear()
         # /admin/api/ s'authentifie par jeton ; /__synunnel/ (hôtes publiés) porte son propre jeton de formulaire.
-        mutating = (request.method in {"POST", "PUT", "PATCH", "DELETE"}
+        # Toute méthode autre que GET, HEAD et OPTIONS exige le jeton : une requête HEAD n'atteint jamais
+        # la branche d'écriture d'une vue (les vues n'écrivent que sur POST).
+        mutating = (request.method not in {"GET", "HEAD", "OPTIONS"}
                     and not request.path.startswith(("/admin/api/", "/__synunnel/")))
         if mutating and not _same_secret(session.get("csrf", ""), request.form.get("csrf_token", "")):
             abort(400, "Jeton CSRF manquant ou invalide.")
@@ -292,7 +294,7 @@ def create_app(config_override: dict | None = None) -> Flask:
     @app.route("/register", methods=["GET", "POST"])
     def register():
         invitation_mode = app.config["REGISTRATION_MODE"] != "approval"
-        if request.method == "GET":
+        if request.method != "POST":
             return render_template("register.html", invitation_mode=invitation_mode)
         _rate_limit("register", _client_ip(), 5, 3600)
         email = request.form.get("email", "").strip().lower()
@@ -334,7 +336,7 @@ def create_app(config_override: dict | None = None) -> Flask:
     @app.route("/login", methods=["GET", "POST"])
     def login():
         next_url = request.values.get("next", "")
-        if request.method == "GET":
+        if request.method != "POST":
             if g.user:
                 return _redirect_after_login(next_url, g.user["id"])
             return render_template("login.html", next_url=next_url, guest_codes=guest.offers_codes(next_url))

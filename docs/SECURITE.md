@@ -4,7 +4,7 @@
 
 **Comptes et sessions**
 - Mots de passe hachés avec Argon2id ; aucun mot de passe en clair en base.
-- Session du tableau de bord en cookie `__Host-`, `Secure`, `HttpOnly`, `SameSite=Lax`, sans domaine partagé, 12 h d'inactivité et 24 h au plus ; toutes les actions web portent un jeton CSRF, renouvelé à la connexion.
+- Session du tableau de bord en cookie `__Host-`, `Secure`, `HttpOnly`, `SameSite=Lax`, sans domaine partagé, 12 h d'inactivité et 24 h au plus ; toute requête web autre que GET, HEAD ou OPTIONS exige un jeton CSRF, renouvelé à la connexion, et les vues n'écrivent que sur POST : une requête HEAD rend la même réponse que GET, sans rien consommer ni écrire.
 - Inscription limitée par adresse IP (par /64 en IPv6) et par adresse mail ; à la connexion, seuls les échecs comptent, par IP, par couple adresse-compte et par compte. Les réponses publiques ne révèlent pas si une adresse possède déjà un compte, et la connexion d'un compte inexistant coûte le même calcul qu'une vraie tentative.
 - Inscription sur invitation par défaut : un code à usage unique, lié à une adresse et remis par l'administrateur, ouvre le compte ; personne ne peut préinscrire l'adresse d'un autre. En mode approbation, un compte neuf reste en attente et n'a accès à rien ; chaque décision de l'administrateur porte sur un couple identifiant-adresse, sous verrou, et une adresse bloquée n'est jamais approuvée. Un compte approuvé peut être suspendu (sessions, accès, jetons et services coupés).
 - Identifiants jamais réattribués : une ancienne session, un jeton de route ou une suppression rejouée ne peut pas viser une ressource créée après.

@@ -26,3 +26,41 @@ def test_page_titles_never_contain_markup_or_csrf_token(app):
         assert response.status_code == 200, path
         for title in TITLE.findall(response.data.decode()):
             assert "<" not in title and "csrf" not in title.lower(), (path, title[:120])
+
+
+COUNTED = ("attempts", "guest_quota", "guest_challenges", "login_challenges", "password_resets", "security_events",
+           "users")
+
+
+def _counts(app) -> dict:
+    from synunnel.db import get_db
+    with app.app_context():
+        db = get_db()
+        return {table: db.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] for table in COUNTED}
+
+
+def test_head_behaves_like_get_and_writes_nothing(app):
+    """Bloquant 2 : HEAD passait dans la branche POST des vues, hors du contrôle CSRF."""
+    paths = ["/login", "/register", "/forgot", "/reset?token=abc", "/recover", "/security/email/confirm?token=abc",
+             "/access/code?next=https%3A%2F%2Fnas.example%2F", "/access/verify", "/login/2fa", "/__synunnel/logout"]
+    client = app.test_client()
+    before = _counts(app)
+    for path in paths:
+        get = client.get(path)
+        head = client.head(path)
+        assert head.status_code == get.status_code, (path, get.status_code, head.status_code)
+        assert head.data == b"", path
+    # Une session qui porte un challenge de connexion : HEAD ne doit ni consommer ni compter un essai.
+    with client.session_transaction() as state:
+        state["challenge"] = "challenge-fictif"
+    assert client.head("/login/2fa").status_code == client.get("/login/2fa").status_code
+    assert _counts(app) == before
+
+
+def test_csrf_is_required_for_every_method_except_safe_ones(app):
+    client = app.test_client()
+    for method in ("POST", "PUT", "PATCH", "DELETE"):
+        response = client.open("/forgot", method=method, data={"email": "x@example.org"})
+        assert response.status_code in {400, 405}, (method, response.status_code)
+        if method == "POST":
+            assert response.status_code == 400
