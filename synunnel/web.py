@@ -35,6 +35,8 @@ from .mailer import Mailer
 EMAIL_RE = actions.EMAIL_RE
 SESSION_MAX_AGE = 86400
 ACCESS_COOKIE = "__Host-synunnel-access"
+SENSITIVE_PATHS = ("/login", "/logout", "/register", "/security", "/forgot", "/reset", "/recover", "/tokens",
+                   "/access/", "/__synunnel/")
 # Vérifié quand le compte n'existe pas : même coût qu'une vraie tentative.
 DUMMY_HASH = PASSWORDS.hash(secrets.token_hex(16))
 PENDING = " La mise en service se termine automatiquement dans quelques minutes."
@@ -268,7 +270,8 @@ def create_app(config_override: dict | None = None) -> Flask:
         )
         if request.is_secure:
             response.headers["Strict-Transport-Security"] = "max-age=31536000"
-        if request.path.startswith("/api/"):
+        if request.path.startswith(("/api/", *SENSITIVE_PATHS)):
+            # Authentification, récupération, sécurité, accès invité : jamais en cache, erreurs comprises.
             response.headers["Cache-Control"] = "no-store"
         if request.path.startswith("/admin/api/"):
             if g.get("admin_ok"):
@@ -339,23 +342,27 @@ def create_app(config_override: dict | None = None) -> Flask:
         ip = _client_ip()
         # Seuls les échecs comptent, par adresse et par couple adresse-compte : un tiers qui se trompe
         # de mot de passe depuis ailleurs ne peut pas empêcher le titulaire de se connecter.
-        if (actions.limit_reached("login_ip", ip, 30, 900) or actions.limit_reached("login_pair", f"{email}|{ip}", 5, 900)
-                or actions.limit_reached("login_email", email, 50, 900)):
-            abort(429, "Trop de tentatives. Réessaie plus tard.")
+        # Chaque essai est réservé atomiquement avant la vérification, puis rendu s'il réussit.
+        slots = []
+        for kind, key, limit in (("login_ip", ip, 30), ("login_pair", f"{email}|{ip}", 5), ("login_email", email, 50)):
+            slot = actions.reserve_attempt(kind, key, limit, 900)
+            if slot is None:
+                actions.release_attempts(*slots)
+                abort(429, "Trop de tentatives. Réessaie plus tard.")
+            slots.append(slot)
         row = get_db().execute("SELECT * FROM users WHERE email=?", (email,)).fetchone()
         valid = account.verify_password(row["password_hash"] if row else DUMMY_HASH, request.form.get("password", ""))
         valid = valid and row is not None
         if not valid:
-            for kind, key in (("login_ip", ip), ("login_pair", f"{email}|{ip}"), ("login_email", email)):
-                actions.record_attempt(kind, key)
             flash("Identifiants invalides.", "error")
             return render_template("login.html", next_url=next_url), 401
+        actions.release_attempts(*slots)
         if row["status"] != "approved":
             flash("Compte en attente de validation.", "error")
             return render_template("login.html", next_url=next_url), 403
         if row["totp_enabled_at"]:
             return account.begin_second_step(row, next_url)
-        account.open_session(row, mfa=False)
+        account.open_session(row["id"], row["session_version"], mfa=False)
         if not account.satisfies_policy(row):
             return redirect(url_for("security_page"))
         return _redirect_after_login(next_url, row["id"])
@@ -580,8 +587,6 @@ def create_app(config_override: dict | None = None) -> Flask:
             flash("Mot de passe incorrect.", "error")
             return redirect(url_for("tokens"))
         with_factor = bool(row["totp_enabled_at"])
-        if with_factor and account.mfa_limited(g.user["id"]):
-            abort(429, "Trop de tentatives. Réessaie plus tard.")
         try:
             name = actions.clean_label(name, 60, "Nom")
         except actions.ActionError:
@@ -591,17 +596,18 @@ def create_app(config_override: dict | None = None) -> Flask:
             return redirect(url_for("tokens"))
         value = api.new_token()
         now = int(time.time())
+        slots = account.reserve_mfa(g.user["id"]) if with_factor else ()
         with db:
             db.execute("BEGIN IMMEDIATE")
             if account.locked_user(db, g.user["id"], row["session_version"], row["credential_version"]) is None:
                 # Mot de passe, 2FA ou statut changés pendant la vérification : aucun jeton n'est créé.
                 db.rollback()
+                actions.release_attempts(*slots)
                 flash("Tes identifiants ont changé pendant l'opération : recommence.", "error")
                 return redirect(url_for("tokens"))
             if with_factor and not account.consume_factor(db, g.user["id"], request.form.get("code", ""),
                                                           row["credential_version"]):
                 db.rollback()
-                account.mfa_failed(g.user["id"])
                 flash("Code de double authentification incorrect.", "error")
                 return redirect(url_for("tokens"))
             active = db.execute(
@@ -610,6 +616,7 @@ def create_app(config_override: dict | None = None) -> Flask:
             ).fetchone()[0]
             if active >= api.MAX_ACTIVE_TOKENS:
                 db.rollback()
+                actions.release_attempts(*slots)
                 flash(f"{api.MAX_ACTIVE_TOKENS} jetons actifs au plus : révoque d'abord un jeton.", "error")
                 return redirect(url_for("tokens"))
             token_id = db.execute(
@@ -620,6 +627,8 @@ def create_app(config_override: dict | None = None) -> Flask:
             ).lastrowid
             db.execute("INSERT INTO api_audit(at,user_id,token_id,action,resource) VALUES(?,?,?,?,?)",
                        (now_iso(), g.user["id"], token_id, "token.create", f"token:{token_id}"))
+        # Réservations rendues hors de toute transaction (elles passent par une autre connexion).
+        actions.release_attempts(*slots)
         # Le jeton n'est montré qu'ici : ni flash, ni session, ni URL.
         response = app.make_response(render_template(
             "token_created.html", name=name, days=days, token=value,

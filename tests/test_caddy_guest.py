@@ -28,3 +28,13 @@ def test_caddy_routes_reserve_synunnel_paths_and_strip_the_access_cookie():
     for raw, expected in (("__Host-synunnel-access=abc", ""), ("a=1; __Host-synunnel-access=abc; b=2", "a=1; b=2"),
                           ("__Host-synunnel-access=abc; b=2", "b=2"), ("a=1", "a=1")):
         assert strip.sub(r"\2", raw) == expected, raw
+
+
+def test_caddy_logs_redact_link_tokens_cookies_and_authorization():
+    config = (ROOT / "config/Caddyfile").read_text()
+    block = config[config.index("log default"):config.index("email __ACME_EMAIL__")]
+    for needle in ("format filter", "request>uri query", "replace token REDACTED", "replace code REDACTED",
+                   "request>headers>Cookie delete", "request>headers>Authorization delete"):
+        assert needle in block, needle
+    # L'essai de bout en bout insère local_certs devant cette ligne : elle doit rester telle quelle.
+    assert "\n    email " in config

@@ -24,7 +24,7 @@ import unicodedata
 from collections.abc import Callable
 
 import requests
-from flask import Flask
+from flask import Flask, current_app
 
 from .db import allocate_id, get_db, now_iso
 from .dns import (
@@ -95,6 +95,40 @@ def record_attempt(kind: str, key: str) -> None:
         db.execute("DELETE FROM attempts WHERE at < ?", (now - 86400,))
     db.execute("INSERT INTO attempts(kind, key, at) VALUES (?, ?, ?)", (kind, key, now))
     db.commit()
+
+
+def reserve_attempt(kind: str, key: str, limit: int, window: int) -> int | None:
+    """Compte et réserve un essai sous un même verrou, sur une connexion à part de celle de la
+    requête : des requêtes simultanées ne peuvent pas toutes voir une place libre. Renvoie
+    l'identifiant de la réservation, ou None si la limite est atteinte."""
+    conn = sqlite3.connect(current_app.config["DATABASE"], timeout=10, isolation_level=None)
+    try:
+        conn.execute("PRAGMA busy_timeout=10000")
+        conn.execute("BEGIN IMMEDIATE")
+        now = int(time.time())
+        used = conn.execute("SELECT COUNT(*) FROM attempts WHERE kind=? AND key=? AND at>=?",
+                            (kind, key, now - window)).fetchone()[0]
+        if used >= limit:
+            conn.execute("ROLLBACK")
+            return None
+        attempt_id = conn.execute("INSERT INTO attempts(kind, key, at) VALUES (?, ?, ?)", (kind, key, now)).lastrowid
+        conn.execute("COMMIT")
+        return attempt_id
+    finally:
+        conn.close()
+
+
+def release_attempts(*attempt_ids: int | None) -> None:
+    """Rend des réservations : un essai réussi ne compte pas comme un échec."""
+    ids = [item for item in attempt_ids if item]
+    if not ids:
+        return
+    conn = sqlite3.connect(current_app.config["DATABASE"], timeout=10, isolation_level=None)
+    try:
+        conn.execute("PRAGMA busy_timeout=10000")
+        conn.executemany("DELETE FROM attempts WHERE id=?", [(item,) for item in ids])
+    finally:
+        conn.close()
 
 
 def rate_limit(kind: str, key: str, limit: int, window: int) -> None:

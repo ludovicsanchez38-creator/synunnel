@@ -354,3 +354,26 @@ def test_api_sets_and_reads_the_guest_option(app, mails):
     spec = client.get("/api/v1/openapi.json").json
     body = spec["paths"]["/addresses/{address_id}/access"]["put"]["requestBody"]["content"]["application/json"]["schema"]
     assert body["properties"]["guest_codes"]["type"] == "boolean"
+
+
+def test_budget_applies_to_challenges_already_issued(app, mails, clock):
+    protected_address(app)
+    clients = [app.test_client() for _ in range(3)]
+    for client in clients:
+        ask_code(client)
+    flush(app)
+    codes = codes_in(mails)
+    assert len(codes) == 3
+    wrong = next(value for value in ("000000", "111111", "222222", "333333") if value not in codes)
+    for _ in range(5):
+        assert verify(clients[0], wrong).status_code == 400
+    # Cinq échecs sur le premier challenge : les deux autres, déjà émis, ne s'ouvrent plus.
+    assert verify(clients[1], codes[1]).status_code == 400
+
+
+def test_host_mail_budget_is_spent_by_every_request(app, mails, clock):
+    protected_address(app)
+    ask_code(app.test_client(), "pas-invite@example.org")
+    with app.app_context():
+        # Même une demande non éligible consomme le budget d'envoi : son état ne révèle rien.
+        assert get_db().execute("SELECT COUNT(*) FROM guest_quota WHERE kind='mail_host'").fetchone()[0] == 1

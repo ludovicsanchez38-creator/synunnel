@@ -660,3 +660,133 @@ def test_c16_migration_is_idempotent_and_reconcile_purges(app, monkeypatch):
     reconcile["main"]()
     with app.app_context():
         assert get_db().execute("SELECT COUNT(*) FROM login_challenges").fetchone()[0] == 0
+
+
+# ---------------------------------------------------------------- revue Codex du diff v0.2 (D1 à D7)
+
+def _clock(monkeypatch):
+    clock = {"now": 1_790_000_010.0}
+    monkeypatch.setattr("synunnel.account._now", lambda: clock["now"])
+    monkeypatch.setattr("synunnel.guest._now", lambda: clock["now"])
+    return clock
+
+
+def _bump_versions(app) -> None:
+    """Réinitialisation concurrente : écrite par une autre connexion, comme une autre requête."""
+    conn = sqlite3.connect(app.config["DATABASE"], timeout=10)
+    conn.execute("UPDATE users SET credential_version=credential_version+1, session_version=session_version+1")
+    conn.commit()
+    conn.close()
+
+
+def _reset_after_commit(app, monkeypatch) -> None:
+    """Une réinitialisation s'intercale entre le commit du changement et l'émission du cookie :
+    `release_attempts` s'exécute précisément là, hors transaction."""
+    from synunnel import actions
+    real_release = actions.release_attempts
+    state = {"done": False}
+
+    def release_then_reset(*ids):
+        real_release(*ids)
+        if len(ids) == 2 and not state["done"]:  # essais de second facteur rendus après le commit
+            state["done"] = True
+            _bump_versions(app)
+
+    monkeypatch.setattr(actions, "release_attempts", release_then_reset)
+
+
+def test_d1_second_step_session_dies_with_a_concurrent_reset(app, monkeypatch):
+    mfa = _mfa()
+    clock = _clock(monkeypatch)
+    client = account(app, "d1@example.net")
+    secret, _ = mfa.enroll(client, clock)
+    browser = app.test_client()
+    assert mfa.password_step(browser, "d1@example.net").status_code == 302
+    _reset_after_commit(app, monkeypatch)
+    clock["now"] += 30
+    assert browser.post("/login/2fa", data={"csrf_token": csrf(browser),
+                                            "code": mfa.totp(secret, clock)}).status_code == 302
+    assert browser.get("/dashboard").status_code == 302
+
+
+def test_d1_refreshed_session_dies_with_a_concurrent_reset(app, monkeypatch):
+    mfa = _mfa()
+    clock = _clock(monkeypatch)
+    client = account(app, "d1b@example.net")
+    secret, _ = mfa.enroll(client, clock)
+    _reset_after_commit(app, monkeypatch)
+    clock["now"] += 30
+    assert client.post("/security/password", data={"csrf_token": csrf(client), "password": PASSWORD,
+                                                   "new_password": "nouveau-mot-de-passe-456",
+                                                   "code": mfa.totp(secret, clock)}).status_code == 302
+    assert client.get("/dashboard").status_code == 302
+
+
+def test_d3_concurrent_wrong_codes_cannot_exceed_the_budget(app, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    mfa = _mfa()
+    clock = _clock(monkeypatch)
+    client = account(app, "d3@example.net")
+    secret, _ = mfa.enroll(client, clock)
+    with app.app_context():
+        db = get_db()
+        uid = db.execute("SELECT id FROM users").fetchone()[0]
+        db.executemany("INSERT INTO attempts(kind,key,at) VALUES('mfa_user',?,?)", [(str(uid), int(time.time()))] * 4)
+        db.commit()
+    browsers = [app.test_client() for _ in range(8)]
+    for browser in browsers:
+        assert mfa.password_step(browser, "d3@example.net").status_code == 302
+    wrong = mfa.totp(secret, clock, offset=7)
+
+    def attempt(browser):
+        return browser.post("/login/2fa", data={"csrf_token": csrf(browser), "code": wrong}).status_code
+
+    with ThreadPoolExecutor(8) as pool:
+        statuses = sorted(pool.map(attempt, browsers))
+    assert statuses.count(401) == 1 and statuses.count(429) == 7
+    with app.app_context():
+        assert get_db().execute("SELECT COUNT(*) FROM attempts WHERE kind='mfa_user'").fetchone()[0] == 5
+
+
+def test_d5_d6_errors_of_sensitive_pages_are_not_cached(app):
+    visitor = app.test_client()
+    for _ in range(5):
+        visitor.post("/forgot", data={"csrf_token": csrf(visitor), "email": "x@example.org"})
+    refused = visitor.post("/forgot", data={"csrf_token": csrf(visitor), "email": "x@example.org"})
+    assert refused.status_code == 429 and refused.headers["Cache-Control"] == "no-store"
+    assert visitor.post("/reset", data={}).headers["Cache-Control"] == "no-store"  # 400 CSRF
+
+
+def test_d7_upgrade_of_a_real_0_1_database(tmp_path, monkeypatch):
+    from conftest import instance_config
+
+    from synunnel import create_app
+    path = tmp_path / "ancienne.db"
+    old = sqlite3.connect(path)
+    old.executescript((ROOT / "tests/fixtures/schema-0.1.sql").read_text())
+    old.execute("INSERT INTO users(id,email,password_hash,status,created_at,session_version) "
+                "VALUES(1,'ancien@example.net','x','approved','2026-09-27',3)")
+    token = "syn_" + "A" * 43
+    old.execute("INSERT INTO api_tokens(user_id,name,token_hash,prefix,scopes,created_at,expires_at) "
+                "VALUES(1,'agent',?,?,'domains',?,?)",
+                (hashlib.sha256(token.encode()).hexdigest(), token[:10], "2026-09-27", int(time.time()) + 3600))
+    old.execute("INSERT INTO domains(id,user_id,name,created_at) VALUES(1,1,'ancien.example.net','x')")
+    old.execute("INSERT INTO machines(id,user_id,name,ip,public_key,created_at) VALUES(1,1,'m','10.88.0.2',?,'x')",
+                (key(3),))
+    old.execute("INSERT INTO addresses(id,domain_id,machine_id,hostname,port,protected,created_at,shared) "
+                "VALUES(1,1,1,'nas.ancien.example.net',80,1,'x',1)")
+    old.commit()
+    old.close()
+    upgraded = create_app(instance_config(SECRET_KEY="s", ADMIN_TOKEN="a", DATABASE=str(path),
+                                          WG_SERVER_PUBLIC_KEY="k"))
+    client = upgraded.test_client()
+    assert client.get("/api/v1/me", headers={"Authorization": f"Bearer {token}"}).status_code == 200
+    with upgraded.app_context():
+        db = get_db()
+        user = db.execute("SELECT credential_version, email_verified_at, totp_enabled_at FROM users").fetchone()
+        assert tuple(user) == (0, None, None)
+        assert tuple(db.execute("SELECT guest_codes, guest_version FROM addresses").fetchone()) == (0, 0)
+        assert db.execute("SELECT credential_version FROM api_tokens").fetchone()[0] == 0
+    import stat as stat_module
+    assert stat_module.S_IMODE(path.stat().st_mode) == 0o600
+    create_app(instance_config(SECRET_KEY="s", ADMIN_TOKEN="a", DATABASE=str(path), WG_SERVER_PUBLIC_KEY="k"))

@@ -105,15 +105,23 @@ def verify_password(password_hash: str, password: str) -> bool:
 
 # ---------------------------------------------------------------- preuves
 
-def mfa_limited(user_id: int) -> bool:
-    return (actions.limit_reached("mfa_user", str(user_id), *MFA_USER_LIMIT)
-            or actions.limit_reached("mfa_ip", client_ip(), *MFA_IP_LIMIT))
+def reserve_mfa(user_id: int) -> tuple[int, int]:
+    """Réserve atomiquement un essai de second facteur, pour le compte et pour l'adresse IP, AVANT le
+    verrou d'écriture de la requête. Un échec garde sa réservation (il compte) ; un succès, ou une
+    sortie sans vérification, la rend par `actions.release_attempts`."""
+    user_slot = actions.reserve_attempt("mfa_user", str(user_id), *MFA_USER_LIMIT)
+    ip_slot = actions.reserve_attempt("mfa_ip", client_ip(), *MFA_IP_LIMIT) if user_slot else None
+    if not user_slot or not ip_slot:
+        actions.release_attempts(user_slot, ip_slot)
+        abort(429, "Trop de tentatives. Réessaie plus tard.")
+    return user_slot, ip_slot
 
 
-def mfa_failed(user_id: int) -> None:
-    # Écriture séparée de la transaction de sécurité (déjà annulée) : l'échec est toujours compté.
-    actions.record_attempt("mfa_user", str(user_id))
-    actions.record_attempt("mfa_ip", client_ip())
+def reserve_or_429(kind: str, key: str, limit: int, window: int) -> int:
+    slot = actions.reserve_attempt(kind, key, limit, window)
+    if slot is None:
+        abort(429, "Trop de tentatives. Réessaie plus tard.")
+    return slot
 
 
 def consume_factor(db, user_id: int, code: str, credential_version: int) -> bool:
@@ -183,20 +191,26 @@ def locked_user(db, user_id: int, session_version: int | None = None, credential
     return row
 
 
-def open_session(user, mfa: bool) -> None:
+def open_session(user_id: int, session_version: int, mfa: bool) -> None:
+    """La version vient de la preuve vérifiée (mot de passe lu, challenge consommé sous verrou), jamais
+    d'une relecture après commit : une révocation concurrente rend alors ce cookie périmé."""
     session.clear()
-    session["user_id"] = user["id"]
-    session["sv"] = user["session_version"]
+    session["user_id"] = user_id
+    session["sv"] = session_version
     session["auth_at"] = int(time.time())
     session["csrf"] = security.new_token()
     session["mfa"] = 1 if mfa else 0
     session.permanent = True
 
 
-def refresh_session(user_id: int, mfa: bool) -> None:
-    """Session courante reconduite avec la nouvelle version, après un changement de justificatif."""
-    row = get_db().execute("SELECT session_version FROM users WHERE id=?", (user_id,)).fetchone()
-    session["sv"] = row["session_version"]
+def version_after_change(db, user_id: int) -> int:
+    """Version de session produite par le changement en cours, lue sous son verrou, avant le commit."""
+    return db.execute("SELECT session_version FROM users WHERE id=?", (user_id,)).fetchone()[0]
+
+
+def refresh_session(session_version: int, mfa: bool) -> None:
+    """Session courante reconduite avec la version que ce changement a produite (lue avant commit)."""
+    session["sv"] = session_version
     session["mfa"] = 1 if mfa else 0
     session["csrf"] = security.new_token()
 
@@ -249,13 +263,12 @@ def register(app: Flask, redirect_after_login) -> None:
         return g.get("user") or g.get("enrolling")
 
     def reauth(user_id: int, password: str):
-        if actions.limit_reached("reauth", str(user_id), 10, 900):
-            abort(429, "Trop de tentatives. Réessaie plus tard.")
+        slot = reserve_or_429("reauth", str(user_id), 10, 900)
         row = get_db().execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
         if row is None or not verify_password(row["password_hash"], password):
-            actions.record_attempt("reauth", str(user_id))
             flash("Mot de passe incorrect.", "error")
             return None
+        actions.release_attempts(slot)
         return row
 
     def enroll_page(user, secret: bytes, enrollment: str, status: int = 200):
@@ -320,8 +333,7 @@ def register(app: Flask, redirect_after_login) -> None:
             return redirect(url_for("login"))
         uid = user["id"]
         enrollment = request.form.get("enrollment", "")
-        if mfa_limited(uid):
-            abort(429, "Trop de tentatives. Réessaie plus tard.")
+        slots = reserve_mfa(uid)
         db = get_db()
         with db:
             db.execute("BEGIN IMMEDIATE")
@@ -340,12 +352,12 @@ def register(app: Flask, redirect_after_login) -> None:
                     secret = None
             if secret is None:
                 db.rollback()
+                actions.release_attempts(*slots)
                 flash("Activation expirée ou remplacée par une autre : recommence.", "error")
                 return redirect(url_for("security_page"))
             step = security.matching_step(secret, request.form.get("code", "").strip(), _now())
             if step is None:
                 db.rollback()
-                mfa_failed(uid)
                 flash("Code incorrect : vérifie l'heure de ton téléphone et réessaie.", "error")
                 return enroll_page(user, secret, enrollment, 401)
             invalidate_credentials(db, uid)
@@ -353,68 +365,63 @@ def register(app: Flask, redirect_after_login) -> None:
                        (row["secret_enc"], now_iso(), step, uid))
             codes = store_codes(db, uid)
             record_event(db, uid, "2fa.enable")
-        refresh_session(uid, mfa=True)
+            new_version = version_after_change(db, uid)
+        actions.release_attempts(*slots)
+        refresh_session(new_version, mfa=True)
         notify(uid, "2fa.enable")
         return codes_page(codes)
 
-    def factor_action(event: str):
-        """Mot de passe redemandé puis code consommé, pour une opération sur la 2FA active."""
+    def factor_action(event: str, change):
+        """Mot de passe redemandé, puis, dans UNE transaction : compte recontrôlé, code consommé,
+        changement appliqué. `change(db, row)` renvoie le résultat de l'opération."""
         user = g.get("user")
         if user is None:
             return None, redirect(url_for("login"))
         row = reauth(user["id"], request.form.get("password", ""))
-        if row is None:
+        if row is None or not row["totp_enabled_at"]:
             return None, redirect(url_for("security_page"))
-        if not row["totp_enabled_at"]:
-            return None, redirect(url_for("security_page"))
-        if mfa_limited(row["id"]):
-            abort(429, "Trop de tentatives. Réessaie plus tard.")
+        slots = reserve_mfa(row["id"])
         db = get_db()
-        db.execute("BEGIN IMMEDIATE")
-        if locked_user(db, row["id"], session.get("sv", -1), row["credential_version"]) is None:
-            db.rollback()
-            abort(401)
-        if not consume_factor(db, row["id"], request.form.get("code", ""), row["credential_version"]):
-            db.rollback()
-            mfa_failed(row["id"])
-            flash("Code de double authentification incorrect.", "error")
-            return None, redirect(url_for("security_page"))
-        record_event(db, row["id"], event)
-        return row, None
+        with db:
+            db.execute("BEGIN IMMEDIATE")
+            if locked_user(db, row["id"], session.get("sv", -1), row["credential_version"]) is None:
+                db.rollback()
+                actions.release_attempts(*slots)
+                abort(401)
+            if not consume_factor(db, row["id"], request.form.get("code", ""), row["credential_version"]):
+                db.rollback()
+                flash("Code de double authentification incorrect.", "error")
+                return None, redirect(url_for("security_page"))
+            record_event(db, row["id"], event)
+            result = change(db, row)
+        actions.release_attempts(*slots)
+        return result, None
 
     @app.post("/security/2fa/disable")
     def totp_disable():
-        row, refused = factor_action("2fa.disable")
-        if refused is not None:
-            return refused
-        db = get_db()
-        try:
+        def disable(db, row):
             invalidate_credentials(db, row["id"])
             db.execute("UPDATE users SET totp_secret_enc=NULL, totp_enabled_at=NULL, totp_last_step=0 WHERE id=?",
                        (row["id"],))
             db.execute("DELETE FROM recovery_codes WHERE user_id=?", (row["id"],))
-            db.commit()
-        except BaseException:
-            db.rollback()
-            raise
-        refresh_session(row["id"], mfa=False)
-        notify(row["id"], "2fa.disable")
+            return row["id"], version_after_change(db, row["id"])
+
+        result, refused = factor_action("2fa.disable", disable)
+        if refused is not None:
+            return refused
+        uid, new_version = result
+        refresh_session(new_version, mfa=False)
+        notify(uid, "2fa.disable")
         flash("Double authentification désactivée. Tes autres sessions et tes jetons d'API sont coupés.", "success")
         return redirect(url_for("security_page"))
 
     @app.post("/security/recovery-codes")
     def recovery_codes():
-        row, refused = factor_action("2fa.codes")
+        result, refused = factor_action("2fa.codes", lambda db, row: (row["id"], store_codes(db, row["id"])))
         if refused is not None:
             return refused
-        db = get_db()
-        try:
-            codes = store_codes(db, row["id"])
-            db.commit()
-        except BaseException:
-            db.rollback()
-            raise
-        notify(row["id"], "2fa.codes")
+        uid, codes = result
+        notify(uid, "2fa.codes")
         return codes_page(codes)
 
     @app.post("/security/password")
@@ -430,25 +437,26 @@ def register(app: Flask, redirect_after_login) -> None:
         if row is None:
             return redirect(url_for("security_page"))
         with_factor = bool(row["totp_enabled_at"])
-        if with_factor and mfa_limited(row["id"]):
-            abort(429, "Trop de tentatives. Réessaie plus tard.")
         new_hash = PASSWORDS.hash(new_password)
+        slots = reserve_mfa(row["id"]) if with_factor else ()
         db = get_db()
         with db:
             db.execute("BEGIN IMMEDIATE")
             if locked_user(db, row["id"], session.get("sv", -1), row["credential_version"]) is None:
                 db.rollback()
+                actions.release_attempts(*slots)
                 abort(401)
             if with_factor and not consume_factor(db, row["id"], request.form.get("code", ""),
                                                   row["credential_version"]):
                 db.rollback()
-                mfa_failed(row["id"])
                 flash("Code de double authentification incorrect.", "error")
                 return redirect(url_for("security_page"))
             invalidate_credentials(db, row["id"])
             db.execute("UPDATE users SET password_hash=? WHERE id=?", (new_hash, row["id"]))
             record_event(db, row["id"], "password.change")
-        refresh_session(row["id"], mfa=with_factor)
+            new_version = version_after_change(db, row["id"])
+        actions.release_attempts(*slots)
+        refresh_session(new_version, mfa=with_factor)
         notify(row["id"], "password.change")
         flash("Mot de passe changé. Tes autres sessions et tes jetons d'API sont coupés.", "success")
         return redirect(url_for("security_page"))
@@ -465,9 +473,7 @@ def register(app: Flask, redirect_after_login) -> None:
         row = reauth(user["id"], request.form.get("password", ""))
         if row is None:
             return redirect(url_for("security_page"))
-        if actions.limit_reached("email_verify", str(row["id"]), 3, 3600):
-            abort(429, "Trop de demandes. Réessaie plus tard.")
-        actions.record_attempt("email_verify", str(row["id"]))
+        reserve_or_429("email_verify", str(row["id"]), 3, 3600)
         value = security.new_token()
         now = int(_now())
         db = get_db()
@@ -491,9 +497,7 @@ def register(app: Flask, redirect_after_login) -> None:
     def email_verify_confirm():
         if request.method == "GET":
             return no_store(render_template("email_confirm.html", token=request.args.get("token", "")[:200]))
-        ip = client_ip()
-        if actions.limit_reached("verify_ip", ip, 10, 900):
-            abort(429, "Trop de tentatives. Réessaie plus tard.")
+        slot = reserve_or_429("verify_ip", client_ip(), 10, 900)
         value = request.form.get("token", "")
         now = int(_now())
         db = get_db()
@@ -511,9 +515,9 @@ def register(app: Flask, redirect_after_login) -> None:
                            (now_iso(), row["user_id"]))
                 record_event(db, row["user_id"], "email.verify", via="email")
         if row is None:
-            actions.record_attempt("verify_ip", ip)
             flash("Lien invalide ou expiré.", "error")
             return no_store((render_template("email_confirm.html", token=""), 400))
+        actions.release_attempts(slot)
         flash("Adresse vérifiée : elle pourra servir à récupérer ton compte.", "success")
         return redirect(url_for("security_page" if g.get("user") else "login"))
 
@@ -521,16 +525,12 @@ def register(app: Flask, redirect_after_login) -> None:
     def forgot():
         if request.method == "GET":
             return no_store(render_template("forgot.html", mail_enabled=mailer().enabled))
-        ip = client_ip()
-        if actions.limit_reached("forgot_ip", ip, 5, 3600):
-            abort(429, "Trop de demandes. Réessaie plus tard.")
-        actions.record_attempt("forgot_ip", ip)
+        reserve_or_429("forgot_ip", client_ip(), 5, 3600)
         email = request.form.get("email", "").strip().lower()[:254]
         # Mêmes étapes et même réponse, qu'un compte existe ou non ; l'envoi part dans une file.
         if actions.EMAIL_RE.fullmatch(email):
-            over = actions.limit_reached("forgot_email", email, 3, 3600)
-            actions.record_attempt("forgot_email", email)
-            if not over and mailer().enabled:
+            allowed = actions.reserve_attempt("forgot_email", email, 3, 3600) is not None
+            if allowed and mailer().enabled:
                 value = security.new_token()
                 now = int(_now())
                 db = get_db()
@@ -568,33 +568,28 @@ def register(app: Flask, redirect_after_login) -> None:
     def reset_password():
         if request.method == "GET":
             return no_store(render_template("reset.html", token=request.args.get("token", "")[:200]))
-        ip = client_ip()
-        if actions.limit_reached("reset_ip", ip, 10, 900):
-            abort(429, "Trop de tentatives. Réessaie plus tard.")
+        slot = reserve_or_429("reset_ip", client_ip(), 10, 900)
         value = request.form.get("token", "")
         email = request.form.get("email", "").strip().lower()[:254]
         password = request.form.get("password", "")
         if len(password) < MIN_PASSWORD:
-            actions.record_attempt("reset_ip", ip)
             return refuse("reset.html", f"Le nouveau mot de passe doit faire au moins {MIN_PASSWORD} caractères.")
-        return consume_ticket("email", value, email, ip, new_password=password)
+        return consume_ticket("email", value, email, slot, new_password=password)
 
     @app.route("/recover", methods=["GET", "POST"])
     def recover():
         if request.method == "GET":
             return no_store(render_template("recover.html", token=""))
-        ip = client_ip()
-        if actions.limit_reached("recover_ip", ip, 10, 900):
-            abort(429, "Trop de tentatives. Réessaie plus tard.")
+        slot = reserve_or_429("recover_ip", client_ip(), 10, 900)
         return consume_ticket("admin", request.form.get("ticket", "").strip(),
-                              request.form.get("email", "").strip().lower()[:254], ip,
+                              request.form.get("email", "").strip().lower()[:254], slot,
                               new_password=request.form.get("new_password", ""),
                               current_password=request.form.get("password", ""))
 
-    def consume_ticket(kind: str, value: str, email: str, ip: str, new_password: str = "",
+    def consume_ticket(kind: str, value: str, email: str, slot: int, new_password: str = "",
                        current_password: str = ""):
+        """Un refus garde la réservation d'essai (il compte) ; un succès la rend."""
         template = "reset.html" if kind == "email" else "recover.html"
-        limit_kind = "reset_ip" if kind == "email" else "recover_ip"
         now = int(_now())
         db = get_db()
         # Le jeton est vérifié avant tout calcul Argon2.
@@ -608,11 +603,9 @@ def register(app: Flask, redirect_after_login) -> None:
         new_hash = None
         if row is not None and scope in ("password", "both"):
             if len(new_password) < MIN_PASSWORD:
-                actions.record_attempt(limit_kind, ip)
                 return refuse(template, f"Le nouveau mot de passe doit faire au moins {MIN_PASSWORD} caractères.")
             new_hash = PASSWORDS.hash(new_password)
         if row is None or (scope == "2fa" and not verify_password(row["password_hash"], current_password)):
-            actions.record_attempt(limit_kind, ip)
             return refuse(template)
         uid = row["user_id"]
         with db:
@@ -623,7 +616,6 @@ def register(app: Flask, redirect_after_login) -> None:
             ).rowcount
             if consumed != 1 or locked_user(db, uid, credential_version=row["credential_version"]) is None:
                 db.rollback()
-                actions.record_attempt(limit_kind, ip)
                 return refuse(template)
             invalidate_credentials(db, uid)
             if new_hash is not None:
@@ -633,6 +625,7 @@ def register(app: Flask, redirect_after_login) -> None:
                            "WHERE id=?", (uid,))
                 db.execute("DELETE FROM recovery_codes WHERE user_id=?", (uid,))
             record_event(db, uid, "password.reset" if kind == "email" else f"recovery.{scope}", via=kind)
+        actions.release_attempts(slot)
         session.clear()
         notify(uid, "password.reset" if kind == "email" else "recovery")
         flash("C'est fait : connecte-toi." + (" La double authentification reste exigée."
@@ -664,8 +657,7 @@ def register(app: Flask, redirect_after_login) -> None:
         if row is None:
             return expired()
         uid = row["user_id"]
-        if mfa_limited(uid):
-            abort(429, "Trop de tentatives. Réessaie plus tard.")
+        slots = reserve_mfa(uid)
         with db:
             db.execute("BEGIN IMMEDIATE")
             used = db.execute(
@@ -674,13 +666,14 @@ def register(app: Flask, redirect_after_login) -> None:
             ).rowcount
             if used != 1 or locked_user(db, uid, row["session_version"], row["credential_version"]) is None:
                 db.rollback()
+                actions.release_attempts(*slots)
                 return expired()
             if not consume_factor(db, uid, request.form.get("code", ""), row["credential_version"]):
                 db.rollback()
-                mfa_failed(uid)
                 flash("Code incorrect.", "error")
                 return no_store((render_template("login_2fa.html"), 401))
-        user = db.execute("SELECT * FROM users WHERE id=?", (uid,)).fetchone()
-        open_session(user, mfa=True)
+        actions.release_attempts(*slots)
+        # Version du challenge, vérifiée sous le verrou : jamais une relecture postérieure au commit.
+        open_session(uid, row["session_version"], mfa=True)
         return redirect_after_login(row["next_url"], uid)
 

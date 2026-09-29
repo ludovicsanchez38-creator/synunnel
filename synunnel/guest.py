@@ -192,20 +192,23 @@ def register(app: Flask) -> None:
             flash("Adresse mail ou destination invalide.", "error")
             return form_page(next_url, 400)
         now = int(_now())
-        real = authorized(db, address["id"], address["route_token"], address["guest_version"], email)
-        # Chaque quota est réservé dans l'ordre, qu'il serve ou non : même travail pour tous.
-        real = reserve("req_email", email, *REQUESTS_PER_EMAIL) and real
-        real = real and _failures(db, address["id"], email) < FAIL_BUDGET[0]
-        real = real and db.execute(
-            "SELECT COUNT(*) FROM guest_challenges WHERE address_id=? AND email=? AND dummy=0 AND used_at IS NULL "
-            "AND expires_at>? AND attempts<?", (address["id"], email, now, MAX_ATTEMPTS),
-        ).fetchone()[0] < LIVE_PER_COUPLE
-        real = real and reserve("mail_host", address["hostname"], *MAILS_PER_HOST)
+        # Chaque vérification et chaque réservation sont faites pour toute demande, invitée ou non :
+        # aucune ressource observable (quota d'envoi de l'hôte compris) ne dépend de l'éligibilité.
+        eligible = authorized(db, address["id"], address["route_token"], address["guest_version"], email)
+        email_ok = reserve("req_email", email, *REQUESTS_PER_EMAIL)
+        host_ok = reserve("mail_host", address["hostname"], *MAILS_PER_HOST)
         challenge = security.new_token()
         code = f"{secrets.randbelow(10**6):06d}"
         label = security.digest(challenge)
         with db:
             db.execute("BEGIN IMMEDIATE")
+            # Budget d'échecs et plafond de challenges vivants lus sous le verrou de l'insertion.
+            failures = _failures(db, address["id"], email)
+            live = db.execute(
+                "SELECT COUNT(*) FROM guest_challenges WHERE address_id=? AND email=? AND dummy=0 AND used_at IS NULL "
+                "AND expires_at>? AND attempts<?", (address["id"], email, now, MAX_ATTEMPTS),
+            ).fetchone()[0]
+            real = eligible and email_ok and host_ok and failures < FAIL_BUDGET[0] and live < LIVE_PER_COUPLE
             db.execute(
                 "INSERT INTO guest_challenges(challenge_hash,address_id,email,route_token,guest_version,next_path,"
                 "mac,dummy,attempts,created_at,expires_at) VALUES(?,?,?,?,?,?,?,?,0,?,?)",
@@ -235,31 +238,34 @@ def register(app: Flask) -> None:
         now = int(_now())
         db = get_db()
         label = security.digest(value) if value else ""
-        row = db.execute(
-            "SELECT * FROM guest_challenges WHERE challenge_hash=? AND used_at IS NULL AND expires_at>? AND attempts<?",
-            (label, now, MAX_ATTEMPTS),
-        ).fetchone() if value else None
 
         def refuse():
             flash("Code incorrect ou expiré.", "error")
             return no_store((render_template("guest_verify.html"), 400))
 
-        if row is None:
-            return refuse()
-        # Même calcul pour un challenge réel ou factice ; seul un réel peut réussir.
-        good = bool(security.CODE_RE.fullmatch(code)) and hmac.compare_digest(_mac(label, code), row["mac"])
-        if not good or row["dummy"]:
-            with db:
+        transfer = secrets.token_urlsafe(32)
+        with db:
+            # Une seule transaction : lecture du challenge, budget cumulatif du couple, comparaison,
+            # puis soit l'échec compté, soit la consommation. Même travail pour un challenge factice.
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute(
+                "SELECT * FROM guest_challenges WHERE challenge_hash=? AND used_at IS NULL AND expires_at>? "
+                "AND attempts<?", (label, now, MAX_ATTEMPTS),
+            ).fetchone() if value else None
+            if row is None:
+                db.rollback()
+                return refuse()
+            budget_left = _failures(db, row["address_id"], row["email"]) < FAIL_BUDGET[0]
+            matches = bool(security.CODE_RE.fullmatch(code)) and hmac.compare_digest(_mac(label, code), row["mac"])
+            if not (matches and budget_left) or row["dummy"]:
                 db.execute("UPDATE guest_challenges SET attempts=attempts+1 WHERE challenge_hash=?", (label,))
                 db.execute("INSERT INTO guest_quota(kind,key,at) VALUES('fail',?,?)",
                            (f"{row['address_id']}|{row['email']}", now))
-                if row["attempts"] + 1 >= MAX_ATTEMPTS:
+                if row["attempts"] + 1 >= MAX_ATTEMPTS or not budget_left:
                     record_event(db, None, "guest.lock", via=f"address:{row['address_id']} {row['email']}",
                                  actor="guest")
-            return refuse()
-        transfer = secrets.token_urlsafe(32)
-        with db:
-            db.execute("BEGIN IMMEDIATE")
+                db.commit()
+                return refuse()
             used = db.execute(
                 "UPDATE guest_challenges SET used_at=? WHERE challenge_hash=? AND used_at IS NULL AND expires_at>? "
                 "AND attempts<? AND dummy=0", (now, label, now, MAX_ATTEMPTS),
