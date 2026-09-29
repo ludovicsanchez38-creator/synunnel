@@ -21,8 +21,10 @@ def test_caddy_routes_reserve_synunnel_paths_and_strip_the_access_cookie():
     config = sync["caddy_routes"](db)
     assert "path /__synunnel/*" in config
     line = next(item for item in config.splitlines() if "header_up Cookie" in item)
-    pattern = re.search(r'header_up Cookie "([^"]+)" ""', line).group(1).replace("[[:space:]]", r"\s")
-    strip = re.compile(pattern)
+    found = re.search(r'header_up Cookie "([^"]+)" "([^"]+)"', line)
+    # Jamais de remplacement vide : Caddy 2.6 poserait alors le motif lui-même comme cookie.
+    assert found and found.group(2) == "$2"
+    strip = re.compile(found.group(1).replace("[[:space:]]", r"\s"))
     for raw, expected in (("__Host-synunnel-access=abc", ""), ("a=1; __Host-synunnel-access=abc; b=2", "a=1; b=2"),
                           ("__Host-synunnel-access=abc; b=2", "b=2"), ("a=1", "a=1")):
-        assert strip.sub("", raw).rstrip("; ") == expected, raw
+        assert strip.sub(r"\2", raw) == expected, raw

@@ -132,7 +132,9 @@ def caddy_routes(db: sqlite3.Connection) -> str:
             "        }",
             f"        reverse_proxy {parsed_ip}:{port} {{",
             # Le cookie d'accès Synunnel ne quitte jamais Caddy : le service de la machine ne le voit pas.
-            '            header_up Cookie "__Host-synunnel-access=[^;]*(;[[:space:]]*)?" ""',
+            # Caddy 2.6 ignore un remplacement "" (il poserait alors le motif comme valeur) : on remplace
+            # par un groupe vide, « $2 », vérifié dans un conteneur sur Caddy 2.6.2.
+            '            header_up Cookie "__Host-synunnel-access=[^;]*(;[[:space:]]*)?()" "$2"',
             "        }",
             "    }",
             "}",
