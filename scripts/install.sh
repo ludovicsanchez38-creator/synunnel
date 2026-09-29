@@ -112,6 +112,10 @@ while [[ "$parent" != / ]]; do
   fi
   parent="$(dirname "$parent")"
 done
+if ! runuser -u synunnel -- test -r "$REPO_DIR/synunnel/__init__.py"; then
+  printf "L'utilisateur synunnel ne peut pas lire %s : clone plutôt le dépôt dans /opt/synunnel.\n" "$REPO_DIR" >&2
+  exit 1
+fi
 install -d -o synunnel -g synunnel -m 0750 /var/lib/synunnel
 install -d -o root -g synunnel -m 0750 /etc/synunnel
 install -d -o pdns -g pdns -m 0755 /var/lib/powerdns
