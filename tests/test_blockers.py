@@ -119,3 +119,23 @@ def test_caddy_template_hides_admin_api_on_the_public_name():
     block = rendered.split("handle @synunnel_dashboard {", 1)[1].split("# __REDIRECT", 1)[0]
     admin = block.index("path /admin/*")
     assert block.index("respond 404", admin) < block.index("reverse_proxy 127.0.0.1:8000")
+
+
+def test_post_without_csrf_token_is_still_refused_on_every_form(app):
+    client = app.test_client()
+    for path in ["/login", "/register", "/forgot", "/reset", "/recover", "/security/email/confirm", "/access/code",
+                 "/access/verify", "/login/2fa", "/__synunnel/logout"]:
+        assert client.post(path, data={"email": "x@example.org"}).status_code == 400, path
+    before = _counts(app)
+    for _ in range(20):
+        client.head("/forgot")
+        client.head("/access/code?next=https%3A%2F%2Fnas.example%2F")
+    assert _counts(app) == before
+
+
+def test_totp_secret_sealed_with_cryptography_46_still_opens_after_the_upgrade():
+    """Bloquant 3 : un secret chiffré en production sous cryptography 46.0.7 reste lisible en 50.x."""
+    from synunnel import security
+
+    sealed_by_46 = "v1:AAECAwQFBgcICQoLItGFJ06VAswtiOKt95vCEP6ZOVjlAmxBE+9+WY2EorzBB9uw"
+    assert security.decrypt_secret(bytes.fromhex("11" * 32), 42, sealed_by_46) == b"12345678901234567890"
