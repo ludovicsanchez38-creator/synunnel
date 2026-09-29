@@ -6,7 +6,7 @@
 <div class="list-grid">
   <section class="card"><h2>Double authentification</h2>
     {% if account.totp_enabled_at %}
-      <p><strong>Active</strong> depuis le {{ account.totp_enabled_at[:10] }}. Il te reste {{ remaining }} code(s) de secours.</p>
+      <p><strong>Active</strong> depuis le {{ account.totp_enabled_at[8:10] }}/{{ account.totp_enabled_at[5:7] }}/{{ account.totp_enabled_at[:4] }}. Il te reste {{ remaining }} code(s) de secours.</p>
       <form method="post" action="{{ url_for('recovery_codes') }}">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
         <h3>Nouveaux codes de secours</h3><p class="small">Les anciens codes cessent aussitôt de fonctionner.</p>

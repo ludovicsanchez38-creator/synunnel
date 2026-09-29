@@ -125,6 +125,7 @@ def test_recovery_codes_have_100_bits_and_normalize():
     shown = security.format_recovery(codes[0])
     assert shown.count("-") == 3 and security.normalize_recovery(shown.lower()) == codes[0]
     assert security.normalize_recovery("ABCDE") is None
+    assert security.normalize_recovery("OIBAA" * 4) == security.normalize_recovery("018AA" * 4) == "OIBAA" * 4
 
 
 def test_totp_key_is_required():

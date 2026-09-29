@@ -111,7 +111,8 @@ def format_recovery(code: str) -> str:
 def normalize_recovery(value: str) -> str | None:
     if not isinstance(value, str):
         return None
-    text = value.replace("-", "").replace(" ", "").upper()
+    # Base32 n'a ni 0, ni 1, ni 8 : ces chiffres ne peuvent être qu'une lecture de O, I ou B.
+    text = value.replace("-", "").replace(" ", "").upper().translate(str.maketrans("018", "OIB"))
     return text if RECOVERY_RE.fullmatch(text) else None
 
 
