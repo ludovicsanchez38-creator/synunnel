@@ -377,3 +377,12 @@ def test_host_mail_budget_is_spent_by_every_request(app, mails, clock):
     with app.app_context():
         # Même une demande non éligible consomme le budget d'envoi : son état ne révèle rien.
         assert get_db().execute("SELECT COUNT(*) FROM guest_quota WHERE kind='mail_host'").fetchone()[0] == 1
+
+
+def test_refused_requests_write_nothing(app, mails, clock):
+    protected_address(app)
+    visitor = app.test_client()
+    statuses = [ask_code(visitor, f"n{n}@example.org").status_code for n in range(15)]
+    assert statuses.count(429) == 5
+    with app.app_context():
+        assert get_db().execute("SELECT COUNT(*) FROM guest_quota WHERE kind='req_ip'").fetchone()[0] == 10

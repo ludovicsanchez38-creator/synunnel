@@ -491,11 +491,24 @@ def main() -> None:
             raise AssertionError(f"Le cookie de l'invité reste valable après sa sortie ({after}).")
         print("Sortie de l'invité par /__synunnel/logout, cookie rejoué refusé : OK")
 
+        # Jeton d'API valable (les précédents sont morts avec les changements de justificatifs) : une
+        # traversée qui atteindrait l'API obtiendrait un 200.
+        live_token = "syn_" + secrets.token_urlsafe(32)
+        with db:
+            db.execute(
+                "INSERT INTO api_tokens(user_id,name,token_hash,prefix,scopes,created_at,expires_at,credential_version) "
+                "SELECT ?, 'e2e-traversee', ?, ?, 'domains', ?, ?, credential_version FROM users WHERE id=?",
+                (user_id, hashlib.sha256(live_token.encode()).hexdigest(), live_token[:10], "2026-09-29T00:00:00Z",
+                 int(time.time()) + 3600, user_id),
+            )
+        if run(*base, "--resolve", resolve, "--output", "/dev/null", "--write-out", "%{http_code}", "--header",
+               f"Authorization: Bearer {live_token}", f"https://{dashboard_host}/api/v1/me").stdout != "200":
+            raise AssertionError("Le jeton de contrôle des traversées n'ouvre pas l'API.")
         # Les chemins réservés ne mènent jamais à l'application par une traversée : ni page du tableau de
         # bord (titre « · Synunnel »), ni réponse de l'API, ni 200.
         for sneaky in ("/__synunnel/../dashboard", "/__synunnel/../login", "/__synunnel/%2e%2e/api/v1/me",
                        "/__synunnel/..%2fapi/v1/me"):
-            for extra in ([], ["--header", f"Authorization: Bearer {api_token}"]):
+            for extra in ([], ["--header", f"Authorization: Bearer {live_token}"]):
                 reply = run(*base, "--path-as-is", "--resolve", f"{PROTECTED}:443:{values['PUBLIC_IPV4']}", *extra,
                             "--write-out", "\\n%{http_code}", f"https://{PROTECTED}{sneaky}", check=False).stdout
                 if EMAIL in reply or reply.rstrip().endswith("\n200") or "· Synunnel</title>" in reply:
@@ -523,17 +536,21 @@ def main() -> None:
         if not link or not link.group(0).startswith(f"https://{dashboard_host}/"):
             raise AssertionError("Le lien de réinitialisation n'a pas la forme attendue.")
         since = time.strftime("%Y-%m-%d %H:%M:%S")
+        marker = "e2e-" + secrets.token_hex(6)
         run("systemctl", "stop", "synunnel")
         down = run(*base, "--resolve", resolve, "--output", "/dev/null", "--write-out", "%{http_code}",
-                   link.group(0), check=False).stdout
+                   f"{link.group(0)}&marqueur={marker}", check=False).stdout
         run("systemctl", "start", "synunnel")
         for _ in range(30):
             if web("/login")[0] == 200:
                 break
             time.sleep(0.5)
-        logged = run("journalctl", "-u", "caddy", "--since", since, "--no-pager", check=False).stdout
-        if down != "502" or link.group(1) in logged:
-            raise AssertionError(f"Journal de Caddy non expurgé sur une erreur ({down}).")
+        time.sleep(1)
+        logged = run("journalctl", "-u", "caddy", "--since", since, "--no-pager").stdout
+        entry = next((line for line in logged.splitlines() if marker in line), "")
+        # L'entrée de la requête doit exister (preuve positive), avec le jeton remplacé et rien de secret.
+        if down != "502" or "token=REDACTED" not in entry or link.group(1) in logged:
+            raise AssertionError(f"Journal de Caddy non expurgé sur une erreur ({down}) : {entry[:300]!r}")
         print("Journal de Caddy expurgé du jeton de réinitialisation sur un 502 : OK")
         new_password = secrets.token_urlsafe(24)
         _, _, html = web(link.group(0).replace(f"https://{dashboard_host}", ""))

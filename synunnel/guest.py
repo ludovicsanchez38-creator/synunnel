@@ -44,7 +44,10 @@ LIVE_PER_COUPLE = 3
 REQUESTS_PER_IP = (10, 3600)
 REQUESTS_PER_EMAIL = (5, 3600)
 VERIFY_PER_IP = (30, 900)
-MAILS_PER_HOST = (50, 3600)  # budget interne d'envoi : jamais visible dans la réponse
+# Budget interne d'envoi par hôte, jamais visible dans la réponse. Consommé par toute demande (sinon il
+# révélerait l'éligibilité) : il borne l'usage SMTP, et reste assez haut pour qu'un déni d'envoi exige
+# de nombreuses adresses IP (10 demandes par heure chacune).
+MAILS_PER_HOST = (200, 3600)
 TRANSFER_TTL = 120
 SESSION_TTL = 43200
 
@@ -89,7 +92,7 @@ def _mac(label: str, value: str) -> str:
 
 def reserve(kind: str, key: str, limit: int, window: int) -> bool:
     """Quota atomique : compte et réserve sous un même verrou, sur une connexion à part de celle de
-    la requête. Chaque demande est comptée, acceptée ou non."""
+    la requête. Une demande refusée n'écrit rien."""
     conn = sqlite3.connect(current_app.config["DATABASE"], timeout=10, isolation_level=None)
     try:
         conn.execute("PRAGMA busy_timeout=10000")
@@ -97,9 +100,13 @@ def reserve(kind: str, key: str, limit: int, window: int) -> bool:
         now = int(_now())
         used = conn.execute("SELECT COUNT(*) FROM guest_quota WHERE kind=? AND key=? AND at>?",
                             (kind, key, now - window)).fetchone()[0]
+        if used >= limit:
+            # Refus sans écriture : un client refusé ne remplit pas la base.
+            conn.execute("ROLLBACK")
+            return False
         conn.execute("INSERT INTO guest_quota(kind,key,at) VALUES(?,?,?)", (kind, key, now))
         conn.execute("COMMIT")
-        return used < limit
+        return True
     finally:
         conn.close()
 
