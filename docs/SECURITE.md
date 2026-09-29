@@ -83,6 +83,7 @@
 ## Limites connues de la v0.2 alpha
 
 - **Zone retirée dès la suppression du domaine.** Une fois la délégation retirée chez le registrar et le domaine supprimé, sa zone quitte aussitôt l'instance ; un résolveur qui a encore l'ancienne délégation en cache (jusqu'au TTL des NS de la zone parente, 48 heures pour `.com`) n'obtient plus de réponse jusqu'à l'expiration. Attendre ce délai après le changement chez le registrar avant de supprimer le domaine.
+- **Archives syslog d'avant l'installation.** Si rsyslog tournait déjà, les archives `/var/log/syslog.*` écrites avant le filtre de Synunnel gardent les journaux de Caddy jusqu'à leur rotation (quatre semaines sur Ubuntu) ; les supprimer à la main si la durée de 30 jours annoncée doit valoir tout de suite.
 - **Un seul serveur DNS, pas de DNSSEC.** Si le VPS tombe, les domaines délégués cessent de répondre, messagerie comprise. Un enregistrement DS laissé chez le registrar casse la résolution.
 - **Copie DNS incomplète par nature.** Le DNS public ne liste ni tous les sous-domaines ni tous les sélecteurs DKIM. Le joker vers le VPS peut capter un nom oublié, par exemple l'hôte d'un MX. Comparer la zone à l'export du fournisseur actuel avant de déléguer.
 - **Cookie d'accès.** Caddy le retire avant le service de la machine (vérifié sur Caddy 2.6.2). Il reste rejouable pendant ses 12 heures par qui le déroberait dans le navigateur : le code à usage unique ne protège que l'ouverture.

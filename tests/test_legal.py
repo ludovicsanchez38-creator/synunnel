@@ -147,4 +147,4 @@ def test_journal_retention_is_applied_on_every_run_and_web_logs_skip_syslog():
     rsyslog = (root / "config" / "rsyslog-synunnel.conf").read_text()
     assert "$programname == 'caddy'" in rsyslog and "$programname == 'synunnel'" in rsyslog and "stop" in rsyslog
     assert "/etc/rsyslog.d/10-synunnel.conf" in installer and "systemctl restart rsyslog" in installer
-    assert "SyslogIdentifier=synunnel" in (root / "config" / "synunnel.service").read_text()
+    assert "SyslogIdentifier=synunnel" in (root / "config" / "synunnel-journal.conf").read_text()

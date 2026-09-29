@@ -351,31 +351,28 @@ install -d -m 0755 "$REPO_DIR/.venvs"
 # ancienne avait un vrai répertoire .venv : il est d'abord rangé dans .venvs/ ; un signal reçu, ou un échec,
 # avant la pose du lien le remet en place. VENV_PREVIOUS désigne l'environnement d'avant, pour un retour.
 VENV_PREVIOUS=""
-restore_legacy_venv() {
-  local repo="$1" legacy="$2"
-  if [[ -n "$legacy" && -d "$repo/$legacy" && ! -e "$repo/.venv" && ! -L "$repo/.venv" ]]; then
-    mv "$repo/$legacy" "$repo/.venv"
-  fi
-}
+VENV_LEGACY=""
+VENV_REPO=""
 swap_venv() {
-  local repo="$1" target="$2" legacy=""
+  local repo="$1" target="$2"
+  VENV_REPO="$repo"
+  VENV_LEGACY=""
   if [[ -L "$repo/.venv" ]]; then
     VENV_PREVIOUS="$(readlink "$repo/.venv")"
   elif [[ -d "$repo/.venv" ]]; then
-    legacy=".venvs/ancien-$(date -u +%Y%m%dT%H%M%SZ)-$$"
-    trap 'restore_legacy_venv "'"$repo"'" "'"$legacy"'"; exit 1' INT TERM HUP
-    mv "$repo/.venv" "$repo/$legacy"
-    VENV_PREVIOUS="$legacy"
+    VENV_LEGACY=".venvs/ancien-$(date -u +%Y%m%dT%H%M%SZ)-$$"
+    VENV_PREVIOUS="$VENV_LEGACY"
   fi
-  if ! ln -sfn "$target" "$repo/.venv.lien" || ! mv -Tf "$repo/.venv.lien" "$repo/.venv"; then
-    restore_legacy_venv "$repo" "$legacy"
-    trap - INT TERM HUP
-    printf "Bascule de l'environnement Python impossible : l'ancien est remis en place.\n" >&2
-    return 1
-  fi
-  # Le piège du rangement est remplacé, sans intervalle, par le retour complet (environnement et unités),
-  # armé jusqu'au contrôle de santé réussi.
+  # Retour complet (environnement et unités) armé avant tout geste : un signal ou un échec à n'importe quel
+  # moment, jusqu'au contrôle de santé réussi, remet l'environnement d'avant.
   arm_runtime_rollback
+  if { [[ -z "$VENV_LEGACY" ]] || mv "$repo/.venv" "$repo/$VENV_LEGACY"; } \
+     && ln -sfn "$target" "$repo/.venv.lien" && mv -Tf "$repo/.venv.lien" "$repo/.venv"; then
+    return 0
+  fi
+  printf "Bascule de l'environnement Python impossible : l'ancien est remis en place.\n" >&2
+  restore_previous_runtime
+  return 1
 }
 # Retour à l'environnement et aux unités d'avant sur tout échec ou signal entre la bascule et le contrôle
 # de santé réussi (piège EXIT : set -e, exit 1 et fin de script compris).
@@ -386,8 +383,13 @@ restore_previous_runtime() {
   RUNTIME_ROLLBACK_ARMED=""
   trap - EXIT INT TERM HUP
   printf "Installation interrompue ou service muet après la bascule : retour à l'environnement et aux unités précédents.\n" >&2
-  rollback_venv "$REPO_DIR" "$VENV_PREVIOUS" || true
-  local unit
+  local repo="${VENV_REPO:-$REPO_DIR}" unit
+  if [[ -n "$VENV_LEGACY" && -d "$repo/$VENV_LEGACY" && ! -e "$repo/.venv" && ! -L "$repo/.venv" ]]; then
+    # Ancien répertoire rangé, lien pas encore posé : il reprend simplement sa place.
+    mv "$repo/$VENV_LEGACY" "$repo/.venv" || true
+  else
+    rollback_venv "$repo" "$VENV_PREVIOUS" || true
+  fi
   for unit in synunnel.service synunnel-reconcile.service synunnel-reconcile.timer; do
     if [[ -e "$UNITS_PREVIOUS/$unit" ]]; then
       cp -p "$UNITS_PREVIOUS/$unit" "$UNIT_DIR/$unit" || true
@@ -471,6 +473,9 @@ done
 install -o root -g root -m 0644 "$REPO_DIR/config/wg0-firewall.nft" /etc/synunnel/wg0-firewall.nft
 install -d -o root -g root -m 0755 /etc/systemd/system/caddy.service.d
 install -o root -g root -m 0644 "$REPO_DIR/config/caddy-synunnel.conf" /etc/systemd/system/caddy.service.d/synunnel.conf
+# Identifiant du service dans le journal, hors de l'unité : le retour à une unité précédente le garde.
+install -d -o root -g root -m 0755 /etc/systemd/system/synunnel.service.d
+install -o root -g root -m 0644 "$REPO_DIR/config/synunnel-journal.conf" /etc/systemd/system/synunnel.service.d/journal.conf
 # Journaux système (requêtes de Caddy et de Gunicorn comprises) gardés 30 jours au plus, comme l'annonce la
 # notice de confidentialité. Le réglage vaut pour tout le journal de la machine.
 # Appliqué à chaque passage : un redémarrage manqué la fois précédente est repris.

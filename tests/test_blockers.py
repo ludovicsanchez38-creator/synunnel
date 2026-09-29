@@ -237,12 +237,23 @@ def _venv_functions() -> str:
 
 
 def _bash(tmp_path, code: str, path_dir=None):
+    """Fonctions de bascule jouées sur un faux dépôt ; systemctl et le dossier des unités sont toujours
+    simulés, jamais ceux de la machine qui lance les tests."""
     import os
     import subprocess
 
-    env = {"PATH": (f"{path_dir}:" if path_dir else "") + os.environ["PATH"]}
-    return subprocess.run(["bash", "-c", _venv_functions() + code], capture_output=True, text=True, check=False,
-                          env=env, cwd=tmp_path)
+    fake = tmp_path / "systeme-simule"
+    (fake / "bin").mkdir(parents=True, exist_ok=True)
+    (fake / "unites").mkdir(exist_ok=True)
+    (fake / "avant").mkdir(exist_ok=True)
+    systemctl = fake / "bin" / "systemctl"
+    if not systemctl.exists():
+        systemctl.write_text(f"#!/bin/sh\necho \"$*\" >> {tmp_path}/systemctl.log\n")
+        systemctl.chmod(0o755)
+    path = ":".join(str(item) for item in (path_dir, fake / "bin") if item) + ":" + os.environ["PATH"]
+    prelude = f'UNIT_DIR="{fake}/unites"; UNITS_PREVIOUS="{fake}/avant"; '
+    return subprocess.run(["bash", "-c", _venv_functions() + prelude + code], capture_output=True, text=True,
+                          check=False, env={"PATH": path}, cwd=tmp_path)
 
 
 def _legacy_repo(tmp_path):
@@ -258,13 +269,13 @@ def test_versioned_environment_is_switched_by_an_atomic_link(tmp_path):
     """Constat 5 (résidu) : chaque environnement garde son chemin, .venv n'est qu'un lien basculé d'un seul
     renommage ; l'ancien répertoire .venv d'une installation précédente est rangé et reste désigné."""
     repo = _legacy_repo(tmp_path)
-    run = _bash(tmp_path, f'swap_venv "{repo}" ".venvs/neuf" && printf "%s" "$VENV_PREVIOUS"')
+    run = _bash(tmp_path, f'swap_venv "{repo}" ".venvs/neuf" && disarm_runtime_rollback && printf "%s" "$VENV_PREVIOUS"')
     assert run.returncode == 0, run.stderr
     assert (repo / ".venv").is_symlink() and (repo / ".venv" / "neuf").exists()
     previous = run.stdout
     assert previous.startswith(".venvs/ancien-") and (repo / previous / "ancien").exists()
     (repo / ".venvs" / "suivant").mkdir()
-    run = _bash(tmp_path, f'swap_venv "{repo}" ".venvs/suivant" && printf "%s" "$VENV_PREVIOUS"')
+    run = _bash(tmp_path, f'swap_venv "{repo}" ".venvs/suivant" && disarm_runtime_rollback && printf "%s" "$VENV_PREVIOUS"')
     assert run.returncode == 0 and run.stdout == ".venvs/neuf" and (repo / ".venv").resolve().name == "suivant"
     run = _bash(tmp_path, f'rollback_venv "{repo}" ".venvs/neuf"')
     assert run.returncode == 0 and (repo / ".venv").resolve().name == "neuf"
@@ -349,3 +360,42 @@ def test_admin_api_requires_a_loopback_peer_and_no_proxy_header_even_empty(app):
     assert remote.status_code == 404
     for empty in ({"X-Forwarded-For": ""}, {"X-Real-IP": ""}):
         assert client.get("/admin/api/pending", headers={**ADMIN, **empty}).status_code == 404, empty
+
+
+
+def test_signal_right_after_the_link_is_renamed_restores_the_previous_environment(tmp_path):
+    """Quatrième passe Codex, constat 5 : un signal entre le renommage du lien et l'armement du retour
+    complet laissait le nouvel environnement actif. Le retour est armé avant tout geste."""
+    for legacy in (True, False):
+        case = tmp_path / ("historique" if legacy else "versionne")
+        case.mkdir()
+        repo = _legacy_repo(case)
+        if not legacy:
+            _bash(case, f'swap_venv "{repo}" ".venvs/neuf" && disarm_runtime_rollback')
+            (repo / ".venvs" / "suivant").mkdir()
+        shims = case / "shims"
+        shims.mkdir()
+        # mv réel, puis signal au script aussitôt le lien renommé.
+        (shims / "mv").write_text('#!/bin/sh\n/bin/mv "$@" || exit $?\n'
+                                  'case "$*" in *.venv.lien*) kill -TERM $PPID; sleep 0.3;; esac\n')
+        (shims / "mv").chmod(0o755)
+        target = ".venvs/neuf" if legacy else ".venvs/suivant"
+        run = _bash(case, f'REPO_DIR="{repo}"; set -e; swap_venv "{repo}" "{target}"; echo jamais', path_dir=shims)
+        assert run.returncode != 0 and "jamais" not in run.stdout, legacy
+        if legacy:
+            assert (repo / ".venv" / "ancien").exists()
+        else:
+            assert (repo / ".venv").resolve().name == "neuf"
+
+
+def test_journal_identifier_lives_in_a_dropin_that_the_rollback_keeps():
+    """Quatrième passe Codex, constat 20 : le retour arrière remettait une unité sans SyslogIdentifier,
+    dont les journaux échappaient au filtre rsyslog. L'identifiant vit dans un drop-in séparé."""
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+    assert "SyslogIdentifier=synunnel" in (root / "config" / "synunnel-journal.conf").read_text()
+    installer = _installer()
+    assert "/etc/systemd/system/synunnel.service.d/journal.conf" in installer
+    restore = installer[installer.index("restore_previous_runtime() {"):installer.index("arm_runtime_rollback() {")]
+    assert "synunnel.service.d" not in restore
