@@ -30,15 +30,17 @@ def _response(rcode=dns.rcode.NOERROR, authority=(), answer=(), truncated=False,
 
 @pytest.fixture
 def parent(monkeypatch):
-    """Zone parente fictive : un serveur public, et la réponse qu'il donnera à la question NS."""
-    state = {"response": None, "udp_calls": 0, "fallback_calls": 0}
+    """Zone parente fictive : deux serveurs publics, et la réponse que chacun donnera à la question NS
+    (`response` pour tous, ou `by_server` pour les faire diverger)."""
+    state = {"response": None, "by_server": {}, "udp_calls": 0, "fallback_calls": 0, "asked": []}
+    addresses = {"a.nic.example.": "9.9.9.9", "b.nic.example.": "149.112.112.112"}
 
     class Target:
         def __init__(self, name):
             self.target = dns.name.from_text(name)
 
     def resolve(name, kind, lifetime=None):
-        return [Target("a.nic.example.")] if kind == "NS" else ["9.9.9.9"]
+        return [Target(host) for host in addresses] if kind == "NS" else [addresses[str(name)]]
 
     def udp(query, where, timeout=None, **kwargs):
         state["udp_calls"] += 1
@@ -46,7 +48,8 @@ def parent(monkeypatch):
 
     def udp_with_fallback(query, where, timeout=None, **kwargs):
         state["fallback_calls"] += 1
-        return state["response"], False
+        state["asked"].append(where)
+        return state["by_server"].get(where, state["response"]), False
 
     monkeypatch.setattr("dns.resolver.resolve", resolve)
     monkeypatch.setattr("dns.query.udp", udp)
@@ -69,7 +72,7 @@ def test_truncated_answer_is_retried_over_tcp_and_never_read_as_complete(parent)
     parent["response"] = _response(authority=[(DOMAIN, "NS", "ns.ailleurs.net.")], truncated=True)
     assert synunnel_dns.delegation_status("client.example", OURS)[0] is None
     # La question passe par la reprise TCP de dnspython, jamais par UDP seul.
-    assert parent["fallback_calls"] == 1 and parent["udp_calls"] == 0
+    assert parent["fallback_calls"] >= 1 and parent["udp_calls"] == 0
 
 
 def test_ns_records_of_another_name_prove_nothing(parent):
@@ -106,6 +109,27 @@ def test_delegation_to_another_host_only_is_a_removal(parent):
     parent["response"] = _response(authority=[(DOMAIN, "NS", "ns1.hebergeur.net.", "ns2.hebergeur.net.")])
     assert synunnel_dns.delegation_status("client.example", OURS) == (False, ["ns1.hebergeur.net.",
                                                                              "ns2.hebergeur.net."])
+
+
+def test_authoritative_answer_of_the_child_zone_proves_nothing_about_the_parent(parent):
+    """Constat 14 : un serveur de la parente qui héberge aussi l'enfant répond pour l'enfant (AA, section
+    réponse) ; la délégation de la parente peut encore désigner l'instance."""
+    parent["response"] = _response(answer=[(DOMAIN, "NS", "ns1.hebergeur.net.")], authoritative=True)
+    assert synunnel_dns.delegation_status("client.example", OURS)[0] is None
+
+
+def test_every_parent_server_is_asked_and_a_disagreement_is_unknown(parent):
+    """Constat 15 : un seul serveur de la parente ne décide plus ; un désaccord vaut indéterminé."""
+    removed = _response(authority=[(DOMAIN, "NS", "ns1.hebergeur.net.")])
+    parent["by_server"] = {"9.9.9.9": removed, "149.112.112.112": _response(authority=[(DOMAIN, "NS", *OURS)])}
+    status, seen = synunnel_dns.delegation_status("client.example", OURS)
+    assert sorted(parent["asked"]) == ["149.112.112.112", "9.9.9.9"]
+    assert synunnel_dns.still_designated(status, seen, OURS) is not False
+    parent["by_server"] = {"9.9.9.9": removed, "149.112.112.112": _response(rcode=dns.rcode.SERVFAIL)}
+    assert synunnel_dns.delegation_status("client.example", OURS)[0] is None
+    parent["by_server"] = {}
+    parent["response"] = removed
+    assert synunnel_dns.delegation_status("client.example", OURS) == (False, ["ns1.hebergeur.net."])
 
 
 def _domain_exists(app, domain_id: int) -> bool:

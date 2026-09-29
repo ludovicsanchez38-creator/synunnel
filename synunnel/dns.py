@@ -183,29 +183,21 @@ def public_address(value: str) -> bool:
     )
 
 
-def delegation_status(domain: str, nameservers: tuple[str, str] | None = None) -> tuple[bool | None, list[str]]:
-    """Interroge directement un serveur de la zone parente.
+PARENT_SERVERS_ASKED = 4
 
-    Renvoie (état, serveurs désignés) : True si la parente désigne tous les serveurs de l'instance, False
-    sur une réponse exploitable qui montre la délégation ailleurs (referral de la parente) ou absente (réponse
-    négative qui fait autorité, avec le SOA de la parente), None dès que la réponse ne prouve rien (erreur,
-    troncature persistante, NS d'un autre nom, réponse de cache, négative sans autorité).
-    Une suppression ne s'appuie que sur False, et encore faut-il qu'aucun serveur de l'instance ne figure
-    dans la liste (voir still_designated).
-    """
-    name = dns.name.from_text(domain)
+
+def _ask_parent_server(name: dns.name.Name, host: str, expected: set[str]) -> tuple[bool | None, set[str]]:
+    """Question NS posée à un serveur de la zone parente : (état, serveurs désignés) pour ce serveur-là."""
     try:
-        parent_ns = dns.resolver.resolve(name.parent(), "NS", lifetime=2)
-        hosts = [item.target.to_text() for item in parent_ns]
-        ip = next(str(item) for item in dns.resolver.resolve(hosts[0], "A", lifetime=2) if public_address(str(item)))
+        ip = next(str(item) for item in dns.resolver.resolve(host, "A", lifetime=2) if public_address(str(item)))
         query = dns.message.make_query(name, "NS")
         query.flags &= ~dns.flags.RD
         # Réponse tronquée : reprise en TCP. Une liste de serveurs incomplète n'est jamais lue comme entière.
         response, _ = dns.query.udp_with_fallback(query, ip, timeout=2)
-    except (dns.exception.DNSException, OSError, IndexError, StopIteration):
-        return None, []
+    except (dns.exception.DNSException, OSError, StopIteration):
+        return None, set()
     if response.flags & dns.flags.TC or response.rcode() not in (dns.rcode.NOERROR, dns.rcode.NXDOMAIN):
-        return None, []
+        return None, set()
 
     def designated(section) -> set[str]:
         # Seuls comptent les NS du domaine lui-même, pas ceux d'un autre nom glissés dans la réponse.
@@ -214,21 +206,47 @@ def delegation_status(domain: str, nameservers: tuple[str, str] | None = None) -
 
     referral, answered = designated(response.authority), designated(response.answer)
     seen = referral | answered
-    expected = {item.lower() for item in (nameservers or configured_nameservers())}
-    authoritative = bool(response.flags & dns.flags.AA)
     if seen & expected:
         # Un serveur de l'instance encore cité, d'où qu'il vienne : la délégation n'est pas retirée.
-        return expected <= seen, sorted(seen)
-    if answered and not authoritative:
-        # NS en section réponse sans AA : une réponse de cache, qui ne prouve rien.
-        return None, []
-    if seen:
-        return False, sorted(seen)
+        return expected <= seen, seen
+    if answered:
+        # NS en section réponse : le serveur parle pour l'enfant (qu'il héberge aussi) ou répond depuis un
+        # cache ; ni l'un ni l'autre ne dit ce que la parente délègue.
+        return None, set()
+    if referral:
+        return False, referral
     # Absence de délégation : seulement sur une réponse qui fait autorité, avec le SOA de la parente.
     parent_soa = any(rrset.rdtype == dns.rdatatype.SOA and rrset.name == name.parent() for rrset in response.authority)
-    if authoritative and parent_soa:
-        return False, []
-    return None, []
+    if response.flags & dns.flags.AA and parent_soa:
+        return False, set()
+    return None, set()
+
+
+def delegation_status(domain: str, nameservers: tuple[str, str] | None = None) -> tuple[bool | None, list[str]]:
+    """Interroge directement les serveurs de la zone parente (au plus PARENT_SERVERS_ASKED).
+
+    Renvoie (état, serveurs désignés) : True si la parente désigne tous les serveurs de l'instance, False
+    si chaque serveur interrogé montre la délégation ailleurs (referral) ou absente (réponse négative qui
+    fait autorité, avec le SOA de la parente), None dès qu'une réponse ne prouve rien (erreur, troncature
+    persistante, NS d'un autre nom, NS en section réponse, négative sans autorité, serveur injoignable).
+    Un serveur qui cite encore l'instance l'emporte sur les autres. Une suppression ne s'appuie que sur
+    False, et encore faut-il qu'aucun serveur de l'instance ne figure dans la liste (voir still_designated).
+    """
+    name = dns.name.from_text(domain)
+    expected = {item.lower() for item in (nameservers or configured_nameservers())}
+    try:
+        hosts = sorted(item.target.to_text() for item in dns.resolver.resolve(name.parent(), "NS", lifetime=2))
+    except (dns.exception.DNSException, OSError):
+        return None, []
+    if not hosts:
+        return None, []
+    results = [_ask_parent_server(name, host, expected) for host in hosts[:PARENT_SERVERS_ASKED]]
+    seen = set().union(*(found for _, found in results))
+    if seen & expected:
+        return expected <= seen, sorted(seen)
+    if any(status is None for status, _ in results):
+        return None, []
+    return False, sorted(seen)
 
 
 def still_designated(active: bool | None, seen: list[str], nameservers: tuple[str, str]) -> bool | None:
