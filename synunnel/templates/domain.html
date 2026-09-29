@@ -1,6 +1,5 @@
 {% extends "base.html" %}
-{% block title %}{{ domain.name }}<section class="card wide"><h2>Supprimer ce domaine</h2><p class="muted">La zone est retirée du DNS de l'instance. Retire d'abord les adresses du domaine, et remets les serveurs de noms de ton hébergeur chez ton registrar avant, sinon le domaine cessera de répondre.</p><form class="inline" method="post" action="{{ url_for('delete_domain', domain_id=domain.id) }}"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="quiet" type="submit">Supprimer {{ domain.name }}</button></form></section>
-{% endblock %}
+{% block title %}{{ domain.name }}{% endblock %}
 {% block content %}
 <section class="page-head"><a class="back" href="{{ url_for('dashboard') }}">← Tableau de bord</a><span class="eyebrow">Zone DNS</span><h1>{{ domain.name }}</h1><p>Vérifiez la copie des enregistrements, en particulier MX, SPF, DMARC et tous vos sélecteurs DKIM, avant de modifier votre registrar.</p></section>
 <div class="list-grid">
