@@ -192,3 +192,17 @@ def test_api_refuses_to_delete_a_delegated_domain(app, monkeypatch):
     monkeypatch.setattr("synunnel.actions.delegation_status", lambda domain, ns: (False, []))
     assert client.delete(f"/api/v1/domains/{domain_id}", headers=bearer(token)).status_code == 200
     assert not _domain_exists(app, domain_id)
+
+
+def test_services_start_through_the_venv_interpreter_not_a_console_script():
+    """L'environnement est construit dans .venv.new puis renommé : les scripts de console gardent l'ancien
+    chemin dans leur ligne #!, seul l'interpréteur (lien vers celui du système) survit au renommage."""
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+    for unit in sorted((root / "config").glob("*.service")):
+        for line in unit.read_text().splitlines():
+            if line.startswith("ExecStart="):
+                assert line.startswith("ExecStart=@REPO_DIR@/.venv/bin/python "), (unit.name, line)
+    installer = (root / "scripts" / "install.sh").read_text()
+    assert '"$REPO_DIR/.venv/bin/python" -m gunicorn --version' in installer

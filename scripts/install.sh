@@ -345,6 +345,9 @@ chmod 0640 /etc/powerdns/pdns.d/synunnel.conf
     mv "$REPO_DIR/.venv" "$REPO_DIR/.venv.prev"
   fi
   mv "$VENV_NEW" "$REPO_DIR/.venv"
+  # Renommé, l'environnement garde un interpréteur valide (lien vers celui du système) mais ses scripts
+  # de console pointent encore vers .venv.new : les services passent donc par `python -m`.
+  (cd / && "$REPO_DIR/.venv/bin/python" -m gunicorn --version) >/dev/null
 )
 
 install -o root -g root -m 0755 "$REPO_DIR/scripts/synunnel-sync.py" /usr/local/sbin/synunnel-sync
