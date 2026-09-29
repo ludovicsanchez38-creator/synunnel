@@ -183,7 +183,10 @@ def public_address(value: str) -> bool:
     )
 
 
-PARENT_SERVERS_ASKED = 4
+# Tous les serveurs de la zone parente sont interrogés, en parallèle, dans ce délai global (secondes) ;
+# au-delà de MAX_PARENT_SERVERS, ou si un seul manque à l'appel, la délégation est indéterminée.
+DELEGATION_DEADLINE = 8.0
+MAX_PARENT_SERVERS = 20
 
 
 def _ask_parent_server(name: dns.name.Name, host: str, expected: set[str]) -> tuple[bool | None, set[str]]:
@@ -223,28 +226,41 @@ def _ask_parent_server(name: dns.name.Name, host: str, expected: set[str]) -> tu
 
 
 def delegation_status(domain: str, nameservers: tuple[str, str] | None = None) -> tuple[bool | None, list[str]]:
-    """Interroge directement les serveurs de la zone parente (au plus PARENT_SERVERS_ASKED).
+    """Interroge directement tous les serveurs de la zone parente, en parallèle, dans DELEGATION_DEADLINE.
 
-    Renvoie (état, serveurs désignés) : True si la parente désigne tous les serveurs de l'instance, False
-    si chaque serveur interrogé montre la délégation ailleurs (referral) ou absente (réponse négative qui
-    fait autorité, avec le SOA de la parente), None dès qu'une réponse ne prouve rien (erreur, troncature
-    persistante, NS d'un autre nom, NS en section réponse, négative sans autorité, serveur injoignable).
-    Un serveur qui cite encore l'instance l'emporte sur les autres. Une suppression ne s'appuie que sur
-    False, et encore faut-il qu'aucun serveur de l'instance ne figure dans la liste (voir still_designated).
+    Renvoie (état, serveurs désignés) : True si chaque serveur parent désigne tous les serveurs de
+    l'instance, False si chacun montre la délégation ailleurs (referral) ou absente (réponse négative qui
+    fait autorité, avec le SOA de la parente), None dès qu'un seul ne prouve rien (erreur, troncature
+    persistante, NS d'un autre nom, NS en section réponse, négative sans autorité, serveur injoignable ou
+    trop lent) ou que la parente a plus de MAX_PARENT_SERVERS serveurs. Un serveur qui cite encore
+    l'instance l'emporte sur les autres. Une suppression ne s'appuie que sur False, et encore faut-il
+    qu'aucun serveur de l'instance ne figure dans la liste (voir still_designated).
     """
     name = dns.name.from_text(domain)
     expected = {item.lower() for item in (nameservers or configured_nameservers())}
     try:
-        hosts = sorted(item.target.to_text() for item in dns.resolver.resolve(name.parent(), "NS", lifetime=2))
+        hosts = sorted({item.target.to_text() for item in dns.resolver.resolve(name.parent(), "NS", lifetime=2)})
     except (dns.exception.DNSException, OSError):
         return None, []
-    if not hosts:
+    if not hosts or len(hosts) > MAX_PARENT_SERVERS:
         return None, []
-    results = [_ask_parent_server(name, host, expected) for host in hosts[:PARENT_SERVERS_ASKED]]
+    pool = ThreadPoolExecutor(max_workers=len(hosts))
+    futures = [pool.submit(_ask_parent_server, name, host, expected) for host in hosts]
+    results = []
+    try:
+        for future in as_completed(futures, timeout=DELEGATION_DEADLINE):
+            results.append(future.result())
+    except TimeoutError:
+        results.append((None, set()))
+    finally:
+        # Les questions encore en vol finissent seules (délais propres de 2 s) ; on ne les attend pas.
+        pool.shutdown(wait=False, cancel_futures=True)
     seen = set().union(*(found for _, found in results))
     if seen & expected:
-        return expected <= seen, sorted(seen)
-    if any(status is None for status, _ in results):
+        # Complète seulement si chaque serveur parent cite tous les serveurs de l'instance.
+        complete = len(results) == len(hosts) and all(expected <= found for _, found in results)
+        return complete, sorted(seen)
+    if len(results) < len(hosts) or any(status is None for status, _ in results):
         return None, []
     return False, sorted(seen)
 

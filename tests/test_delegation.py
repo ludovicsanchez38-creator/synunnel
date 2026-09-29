@@ -32,8 +32,9 @@ def _response(rcode=dns.rcode.NOERROR, authority=(), answer=(), truncated=False,
 def parent(monkeypatch):
     """Zone parente fictive : deux serveurs publics, et la réponse que chacun donnera à la question NS
     (`response` pour tous, ou `by_server` pour les faire diverger)."""
-    state = {"response": None, "by_server": {}, "udp_calls": 0, "fallback_calls": 0, "asked": []}
+    state = {"response": None, "by_server": {}, "udp_calls": 0, "fallback_calls": 0, "asked": [], "slow": set()}
     addresses = {"a.nic.example.": "9.9.9.9", "b.nic.example.": "149.112.112.112"}
+    state["addresses"] = addresses
 
     class Target:
         def __init__(self, name):
@@ -47,8 +48,12 @@ def parent(monkeypatch):
         return state["response"]
 
     def udp_with_fallback(query, where, timeout=None, **kwargs):
+        import time
+
         state["fallback_calls"] += 1
         state["asked"].append(where)
+        if where in state["slow"]:
+            time.sleep(1)
         return state["by_server"].get(where, state["response"]), False
 
     monkeypatch.setattr("dns.resolver.resolve", resolve)
@@ -224,3 +229,35 @@ def test_reconcile_rechecks_the_delegation_before_removing_a_pending_zone(app, m
     monkeypatch.setitem(reconcile["main"].__globals__, "delegation_status", lambda domain, ns: states[domain])
     reconcile["main"]()
     assert pending("revenue.example") and pending("douteuse.example") and not pending("partie.example")
+
+
+def _five_parents(parent):
+    parent["addresses"].update({"c.nic.example.": "8.8.8.8", "d.nic.example.": "8.8.4.4",
+                                "e.nic.example.": "1.1.1.1"})
+
+
+def test_every_parent_server_is_asked_even_beyond_four(parent):
+    """Troisième passe Codex, constat 15 : quatre serveurs montraient le retrait, le cinquième désignait
+    encore l'instance et n'était jamais interrogé."""
+    _five_parents(parent)
+    parent["response"] = _response(authority=[(DOMAIN, "NS", "ns1.hebergeur.net.")])
+    parent["by_server"] = {"1.1.1.1": _response(authority=[(DOMAIN, "NS", *OURS)])}
+    status, seen = synunnel_dns.delegation_status("client.example", OURS)
+    assert len(set(parent["asked"])) == 5
+    assert synunnel_dns.still_designated(status, seen, OURS) is True
+
+
+def test_a_parent_server_too_slow_makes_the_delegation_unknown(parent, monkeypatch):
+    _five_parents(parent)
+    monkeypatch.setattr("synunnel.dns.DELEGATION_DEADLINE", 0.3)
+    parent["response"] = _response(authority=[(DOMAIN, "NS", "ns1.hebergeur.net.")])
+    parent["slow"] = {"8.8.4.4"}
+    assert synunnel_dns.delegation_status("client.example", OURS)[0] is None
+
+
+def test_complete_only_when_every_parent_lists_every_instance_server(parent):
+    """Constat 21 : un parent qui ne cite que NS1 et un autre que NS2 ne font pas une délégation complète."""
+    parent["by_server"] = {"9.9.9.9": _response(authority=[(DOMAIN, "NS", OURS[0])]),
+                           "149.112.112.112": _response(authority=[(DOMAIN, "NS", OURS[1])])}
+    status, seen = synunnel_dns.delegation_status("client.example", OURS)
+    assert status is False and synunnel_dns.still_designated(status, seen, OURS) is True
