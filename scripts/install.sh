@@ -167,7 +167,8 @@ REGISTRATION_MODE=$REGISTRATION_MODE
 SYNC_COMMAND='/usr/bin/sudo -n /usr/local/sbin/synunnel-sync'
 EOF
 fi
-for setting in DASHBOARD_HOST NS1_HOST NS2_HOST SOA_RNAME REDIRECT_HOSTS ACME_EMAIL \
+# Une instance antérieure peut ne pas avoir toutes les clés : on complète le fichier sans rien écraser.
+for setting in PUBLIC_IPV4 PUBLIC_IPV6 DASHBOARD_HOST NS1_HOST NS2_HOST SOA_RNAME REDIRECT_HOSTS ACME_EMAIL \
   RESERVED_DOMAINS MAX_DOMAINS_PER_USER MAX_MACHINES_PER_USER MAX_ADDRESSES_PER_USER MAX_RECORDS_PER_DOMAIN \
   REGISTRATION_MODE; do
   if ! grep -q "^${setting}=" /etc/synunnel/synunnel.env; then
