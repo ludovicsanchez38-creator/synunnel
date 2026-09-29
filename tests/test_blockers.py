@@ -220,9 +220,9 @@ def test_environment_is_swapped_only_once_caddy_and_units_are_ready():
     script = _installer()
     build = script.index('python3 -m venv "$VENV_NEW"')
     validate = script.index('caddy validate --config "$CADDY_CANDIDATE"')
-    units = script.index('> "/etc/systemd/system/$unit"')
+    units = script.index('> "$UNIT_DIR/$unit"')
     swap = script.index('swap_venv "$REPO_DIR"')
-    reload = script.index("systemctl daemon-reload")
+    reload = script.index("\nsystemctl daemon-reload\n", units)
     # Unités chargées avant la bascule : un arrêt entre les deux laisse systemd sur `python -m gunicorn`,
     # jamais sur l'ancien `.venv/bin/gunicorn` face à un environnement dont les scripts pointent ailleurs.
     assert build < validate < units < reload < swap
@@ -286,13 +286,59 @@ def test_interrupted_or_failed_switch_puts_the_previous_environment_back(tmp_pat
     assert run.returncode != 0 and (repo / ".venv" / "ancien").exists()
 
 
-def test_failed_health_check_restores_the_previous_environment_and_units():
+def _runtime(tmp_path):
+    """Faux dépôt déjà basculé, unités d'avant gardées de côté, systemctl simulé qui note ses appels."""
+    repo = _legacy_repo(tmp_path)
+    units, previous, shims = tmp_path / "unites", tmp_path / "avant", tmp_path / "shims"
+    for folder in (units, previous, shims):
+        folder.mkdir()
+    (units / "synunnel.service").write_text("nouvelle")
+    (previous / "synunnel.service").write_text("ancienne")
+    (shims / "systemctl").write_text(f"#!/bin/sh\necho \"$*\" >> {tmp_path}/systemctl.log\n")
+    (shims / "systemctl").chmod(0o755)
+    prelude = (f'REPO_DIR="{repo}"; UNIT_DIR="{units}"; UNITS_PREVIOUS="{previous}"; set -e; '
+               f'swap_venv "{repo}" ".venvs/neuf"; ')
+    return repo, units, shims, prelude
+
+
+def test_any_failure_or_signal_before_the_health_check_restores_the_previous_runtime(tmp_path):
+    """Troisième passe Codex, constat 5 : un signal après la pose du lien, pendant le contrôle de santé, ou
+    un échec d'une commande avant lui, laissait le nouvel environnement actif."""
+    for ending in ("false", "kill -TERM $$; sleep 1"):
+        case = tmp_path / ending.split()[0]
+        case.mkdir()
+        repo, units, shims, prelude = _runtime(case)
+        run = _bash(case, prelude + ending + "; echo jamais", path_dir=shims)
+        assert run.returncode != 0 and "jamais" not in run.stdout, ending
+        assert (repo / ".venv" / "ancien").exists(), ending
+        assert (units / "synunnel.service").read_text() == "ancienne", ending
+        assert "daemon-reload" in (case / "systemctl.log").read_text(), ending
+
+
+def test_healthy_runtime_is_kept_once_the_rollback_is_disarmed(tmp_path):
+    repo, units, shims, prelude = _runtime(tmp_path)
+    run = _bash(tmp_path, prelude + "disarm_runtime_rollback; exit 0", path_dir=shims)
+    assert run.returncode == 0 and (repo / ".venv" / "neuf").exists()
+    assert (units / "synunnel.service").read_text() == "nouvelle"
+
+
+def test_pruning_keeps_the_current_and_previous_environments_even_through_an_absolute_link(tmp_path):
+    """Constat 18 : un lien absolu vers l'environnement précédent le faisait supprimer au nettoyage."""
+    repo = tmp_path / "depot"
+    for name in ("v0", "v1", "v2", "ancien-x"):
+        (repo / ".venvs" / name).mkdir(parents=True)
+    run = _bash(tmp_path, f'prune_venvs "{repo}" ".venvs/v2" "{repo}/.venvs/v0"')
+    assert run.returncode == 0, run.stderr
+    assert sorted(item.name for item in (repo / ".venvs").iterdir()) == ["v0", "v2"]
+
+
+def test_installer_arms_the_rollback_through_the_swap_and_disarms_it_only_when_healthy():
     script = _installer()
-    health = script[script.index("if ! service_healthy; then"):]
-    health = health[:health.index("\nfi\n")]
-    assert 'rollback_venv "$REPO_DIR" "$VENV_PREVIOUS"' in health
-    assert "$UNITS_PREVIOUS" in health and "systemctl daemon-reload" in health and "exit 1" in health
-    assert script.index('UNITS_PREVIOUS="$(mktemp -d') < script.index('> "/etc/systemd/system/$unit"')
+    swap = script.index('swap_venv "$REPO_DIR" ".venvs/$VENV_ID"')
+    healthy = script.index("if ! service_healthy; then")
+    disarm = script.index("disarm_runtime_rollback", healthy)
+    assert swap < healthy < disarm
+    assert "arm_runtime_rollback" in script[script.index("swap_venv() {"):script.index("rollback_venv() {")]
 
 def test_admin_api_requires_a_loopback_peer_and_no_proxy_header_even_empty(app):
     """Constat 9 de la revue Codex : la garde reposait sur la valeur des en-têtes, pas sur l'origine."""

@@ -370,7 +370,54 @@ swap_venv() {
     printf "Bascule de l'environnement Python impossible : l'ancien est remis en place.\n" >&2
     return 1
   fi
-  trap - INT TERM HUP
+  # Le piège du rangement est remplacé, sans intervalle, par le retour complet (environnement et unités),
+  # armé jusqu'au contrôle de santé réussi.
+  arm_runtime_rollback
+}
+# Retour à l'environnement et aux unités d'avant sur tout échec ou signal entre la bascule et le contrôle
+# de santé réussi (piège EXIT : set -e, exit 1 et fin de script compris).
+RUNTIME_ROLLBACK_ARMED=""
+UNIT_DIR=/etc/systemd/system
+restore_previous_runtime() {
+  [[ -n "$RUNTIME_ROLLBACK_ARMED" ]] || return 0
+  RUNTIME_ROLLBACK_ARMED=""
+  trap - EXIT INT TERM HUP
+  printf "Installation interrompue ou service muet après la bascule : retour à l'environnement et aux unités précédents.\n" >&2
+  rollback_venv "$REPO_DIR" "$VENV_PREVIOUS" || true
+  local unit
+  for unit in synunnel.service synunnel-reconcile.service synunnel-reconcile.timer; do
+    if [[ -e "$UNITS_PREVIOUS/$unit" ]]; then
+      cp -p "$UNITS_PREVIOUS/$unit" "$UNIT_DIR/$unit" || true
+    fi
+  done
+  systemctl daemon-reload || true
+  systemctl restart synunnel || true
+  printf 'Voir journalctl -u synunnel ; pour revenir au code précédent : git checkout, puis relancer ce script.\n' >&2
+}
+arm_runtime_rollback() {
+  RUNTIME_ROLLBACK_ARMED=1
+  trap 'restore_previous_runtime; exit 1' INT TERM HUP
+  trap 'restore_previous_runtime' EXIT
+}
+disarm_runtime_rollback() {
+  RUNTIME_ROLLBACK_ARMED=""
+  trap - EXIT INT TERM HUP
+}
+# Garde l'environnement courant et le précédent, compare les chemins réels (liens relatifs ou absolus).
+prune_venvs() {
+  python3 - "$@" <<'PY'
+import shutil, sys
+from pathlib import Path
+repo = Path(sys.argv[1])
+keep = {(item if Path(item).is_absolute() else repo / item) for item in sys.argv[2:] if item}
+keep = {Path(item).resolve() for item in keep}
+for old in (repo / ".venvs").iterdir():
+    if old.is_dir() and not old.is_symlink() and old.resolve() not in keep:
+        shutil.rmtree(old)
+for legacy in (".venv.new", ".venv.prev"):
+    if (repo / legacy).is_dir() and not (repo / legacy).is_symlink():
+        shutil.rmtree(repo / legacy)
+PY
 }
 rollback_venv() {
   local repo="$1" previous="$2" path
@@ -410,13 +457,13 @@ python3 -c 'import pathlib,sys; pathlib.Path(sys.argv[1]).unlink()' "$CADDY_CAND
 # bascule, elles reviennent avec l'environnement précédent.
 UNITS_PREVIOUS="$(mktemp -d /run/synunnel-unites.XXXXXX)"
 for unit in synunnel.service synunnel-reconcile.service synunnel-reconcile.timer; do
-  if [[ -e "/etc/systemd/system/$unit" ]]; then
-    cp -p "/etc/systemd/system/$unit" "$UNITS_PREVIOUS/$unit"
+  if [[ -e "$UNIT_DIR/$unit" ]]; then
+    cp -p "$UNIT_DIR/$unit" "$UNITS_PREVIOUS/$unit"
   fi
 done
 for unit in synunnel.service synunnel-reconcile.service synunnel-reconcile.timer; do
-  sed "s#@REPO_DIR@#$REPO_DIR#g" "$REPO_DIR/config/$unit" > "/etc/systemd/system/$unit"
-  chmod 0644 "/etc/systemd/system/$unit"
+  sed "s#@REPO_DIR@#$REPO_DIR#g" "$REPO_DIR/config/$unit" > "$UNIT_DIR/$unit"
+  chmod 0644 "$UNIT_DIR/$unit"
 done
 install -o root -g root -m 0644 "$REPO_DIR/config/wg0-firewall.nft" /etc/synunnel/wg0-firewall.nft
 install -d -o root -g root -m 0755 /etc/systemd/system/caddy.service.d
@@ -454,31 +501,14 @@ service_healthy() {
   return 1
 }
 if ! service_healthy; then
-  # Retour à l'environnement et aux unités d'avant ; le code du dépôt, lui, reste celui qui est extrait.
-  printf "Le service ne répond pas avec le nouvel environnement : retour à l'environnement et aux unités précédents.\n" >&2
-  rollback_venv "$REPO_DIR" "$VENV_PREVIOUS"
-  for unit in synunnel.service synunnel-reconcile.service synunnel-reconcile.timer; do
-    if [[ -e "$UNITS_PREVIOUS/$unit" ]]; then
-      install -o root -g root -m 0644 "$UNITS_PREVIOUS/$unit" "/etc/systemd/system/$unit"
-    fi
-  done
-  systemctl daemon-reload
-  systemctl restart synunnel || true
-  printf 'Voir journalctl -u synunnel ; pour revenir au code précédent : git checkout, puis relancer ce script.\n' >&2
+  # Le piège armé à la bascule remet l'environnement et les unités d'avant ; le code du dépôt, lui, reste
+  # celui qui est extrait.
+  printf "Le service ne répond pas avec le nouvel environnement.\n" >&2
   exit 1
 fi
+disarm_runtime_rollback
 # Service sain : on ne garde que l'environnement courant et le précédent (retour rapide).
-python3 - "$REPO_DIR" ".venvs/$VENV_ID" "$VENV_PREVIOUS" <<'PY'
-import shutil, sys
-from pathlib import Path
-repo, keep = Path(sys.argv[1]), {item for item in sys.argv[2:] if item}
-for old in (repo / ".venvs").iterdir():
-    if old.is_dir() and not old.is_symlink() and f".venvs/{old.name}" not in keep:
-        shutil.rmtree(old)
-for legacy in (".venv.new", ".venv.prev"):
-    if (repo / legacy).is_dir() and not (repo / legacy).is_symlink():
-        shutil.rmtree(repo / legacy)
-PY
+prune_venvs "$REPO_DIR" ".venvs/$VENV_ID" "$VENV_PREVIOUS"
 /usr/local/sbin/synunnel-sync
 # Le tunnel doit revenir seul après un redémarrage du VPS.
 systemctl enable wg-quick@wg0
