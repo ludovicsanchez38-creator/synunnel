@@ -17,7 +17,8 @@ def _json(schema: dict, description: str) -> dict:
 
 def _errors(*codes: int) -> dict:
     labels = {400: "Corps illisible ou qui n'est pas un objet JSON", 401: "Jeton absent, invalide, expiré ou révoqué",
-              403: "Permission du jeton insuffisante pour cette opération",
+              403: "Permission du jeton insuffisante, ou double authentification exigée par l'instance "
+                   "(code mfa_required)",
               404: "Ressource introuvable dans ce compte", 409: "Conflit, quota atteint ou ressource utilisée",
               415: "Corps attendu en application/json", 422: "Champ invalide", 429: "Trop de requêtes (voir Retry-After)"}
     return {str(code): _json(ERROR, labels[code]) for code in codes}
@@ -53,7 +54,10 @@ def document(app: Flask) -> dict:
                 "l'adresse du tableau de bord ci-dessous : les "
                 "adresses publiées le refusent. Une création rejouée avec les mêmes valeurs renvoie 200 et la "
                 "ressource existante. « synced » à false signifie que la mise en service se terminera au "
-                "prochain rapprochement automatique (quelques minutes)."
+                "prochain rapprochement automatique (quelques minutes). Un jeton meurt au premier changement "
+                "de justificatif de son compte (mot de passe, double authentification, suspension) : 401. "
+                "Sur une instance qui exige la double authentification, un compte sans elle reçoit 403 "
+                "mfa_required."
             ),
         },
         "servers": [{"url": f"https://{app.config['DASHBOARD_HOST']}/api/v1"}],

@@ -39,10 +39,10 @@ def key(n: int) -> str:
 ALL = ("domains", "machines", "addresses", "sharing")
 
 
-def create_token(client, scope="deploy", days: int = 30, password: str = PASSWORD) -> str | None:
+def create_token(client, scope="deploy", days: int = 30, password: str = PASSWORD, code: str = "") -> str | None:
     permissions = {"read": (), "deploy": ALL}.get(scope, scope) if isinstance(scope, str) else scope
     response = client.post("/tokens", data={"csrf_token": csrf(client), "name": "agent", "permissions": list(permissions),
-                                            "days": str(days), "password": password})
+                                            "days": str(days), "password": password, "code": code})
     match = re.search(rb"syn_[A-Za-z0-9_-]{40,}", response.data)
     if match:
         assert response.headers["Cache-Control"] == "no-store"

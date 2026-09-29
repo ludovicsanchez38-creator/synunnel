@@ -1,0 +1,57 @@
+{% extends "base.html" %}
+{% block title %}Sécurité du compte{% endblock %}
+{% block content %}
+<section class="page-head">{% if not enrolling %}<a class="back" href="{{ url_for('dashboard') }}">← Tableau de bord</a>{% endif %}<span class="eyebrow">{{ account.email }}</span><h1>Sécurité du compte</h1>
+  {% if enrolling %}<p>Cette instance exige la double authentification. Active-la pour accéder à ton espace : il te faut une application de codes sur ton téléphone (par exemple Aegis, 2FAS, Google Authenticator ou le gestionnaire de mots de passe de ton choix).</p>{% else %}<p>Double authentification, mot de passe et adresse de récupération.</p>{% endif %}</section>
+<div class="list-grid">
+  <section class="card"><h2>Double authentification</h2>
+    {% if account.totp_enabled_at %}
+      <p><strong>Active</strong> depuis le {{ account.totp_enabled_at[:10] }}. Il te reste {{ remaining }} code(s) de secours.</p>
+      <form method="post" action="{{ url_for('recovery_codes') }}">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <h3>Nouveaux codes de secours</h3><p class="small">Les anciens codes cessent aussitôt de fonctionner.</p>
+        <label>Mot de passe<input type="password" name="password" autocomplete="current-password" required></label>
+        <label>Code à six chiffres<input name="code" inputmode="numeric" autocomplete="one-time-code" maxlength="32" required></label>
+        <button class="button" type="submit">Générer de nouveaux codes</button>
+      </form>
+      <form method="post" action="{{ url_for('totp_disable') }}">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <h3>Désactiver</h3><p class="small">Tes autres sessions et tes jetons d'API seront coupés.</p>
+        <label>Mot de passe<input type="password" name="password" autocomplete="current-password" required></label>
+        <label>Code à six chiffres ou code de secours<input name="code" autocomplete="one-time-code" maxlength="32" required></label>
+        <button class="quiet" type="submit">Désactiver la double authentification</button>
+      </form>
+    {% else %}
+      <p>À chaque connexion, en plus du mot de passe, Synunnel te demandera un code affiché par ton téléphone.</p>
+      <p class="small">L'activation coupe tes autres sessions et révoque tes jetons d'API : tu en recréeras après.</p>
+      <form method="post" action="{{ url_for('totp_start') }}">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <label>Mot de passe <span class="hint">redemandé pour activer</span><input type="password" name="password" autocomplete="current-password" required></label>
+        <button class="button" type="submit">Activer la double authentification</button>
+      </form>
+    {% endif %}
+  </section>
+  {% if not enrolling %}
+  <section class="card"><h2>Mot de passe</h2>
+    <p class="small">Changer de mot de passe coupe tes autres sessions et révoque tes jetons d'API.</p>
+    <form method="post" action="{{ url_for('change_password') }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <label>Mot de passe actuel<input type="password" name="password" autocomplete="current-password" required></label>
+      <label>Nouveau mot de passe <span class="hint">12 caractères minimum</span><input type="password" name="new_password" minlength="12" autocomplete="new-password" required></label>
+      {% if account.totp_enabled_at %}<label>Code à six chiffres<input name="code" inputmode="numeric" autocomplete="one-time-code" maxlength="32" required></label>{% endif %}
+      <button class="button" type="submit">Changer le mot de passe</button>
+    </form>
+  </section>
+  <section class="card"><h2>Adresse de récupération</h2>
+    {% if account.email_verified_at %}<p><strong>Vérifiée</strong> : en cas d'oubli, un lien de réinitialisation peut partir vers {{ account.email }}.</p>
+    {% elif mail_enabled %}<p>Ton adresse n'est pas encore vérifiée : tant qu'elle ne l'est pas, le mot de passe oublié passe par l'administrateur.</p>
+      <form method="post" action="{{ url_for('email_verify_request') }}">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <label>Mot de passe<input type="password" name="password" autocomplete="current-password" required></label>
+        <button class="button" type="submit">M'envoyer un lien de vérification</button>
+      </form>
+    {% else %}<p>Cette instance n'envoie pas de mails : en cas d'oubli, l'administrateur te remet un ticket de récupération.</p>{% endif %}
+  </section>
+  {% endif %}
+</div>
+{% endblock %}

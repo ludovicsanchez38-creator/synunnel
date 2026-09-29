@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block title %}Activer la double authentification{% endblock %}
+{% block content %}
+<section class="page-head"><a class="back" href="{{ url_for('security_page') }}">← Sécurité du compte</a><span class="eyebrow">Étape 1 sur 2</span><h1>Scanne ce code avec ton téléphone</h1><p>Dans ton application de codes, ajoute un compte en scannant ce QR code, ou saisis la clé à la main. Puis entre le code à six chiffres qu'elle affiche. Cette page expire dans 10 minutes.</p></section>
+<div class="list-grid">
+  <section class="card"><h2>QR code</h2><div class="qr" role="img" aria-label="QR code de la clé de double authentification">{{ qr | safe }}</div>
+    <p class="small">Clé à saisir à la main :</p><div class="code-line"><code id="totp-secret">{{ secret }}</code></div></section>
+  <section class="card"><h2>Confirmer</h2>
+    <form method="post" action="{{ url_for('totp_confirm') }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}"><input type="hidden" name="enrollment" value="{{ enrollment }}">
+      <label>Code à six chiffres<input name="code" inputmode="numeric" autocomplete="one-time-code" maxlength="6" required autofocus></label>
+      <button class="button" type="submit">Activer</button>
+    </form>
+    <p class="small">L'activation coupe tes autres sessions et révoque tes jetons d'API.</p></section>
+</div>
+{% endblock %}

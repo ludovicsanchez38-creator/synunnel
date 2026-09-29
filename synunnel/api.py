@@ -100,12 +100,19 @@ def _refuse_anonymous() -> None:
     actions.record_attempt("api_auth_all", "*")
 
 
+# Un jeton ne vaut que pour la version des justificatifs qui l'a émis : un changement de mot de
+# passe, de 2FA ou une suspension le rend caduc, même s'il a été inséré pendant ce changement.
+TOKEN_SQL = ("SELECT t.*, u.email, u.totp_enabled_at FROM api_tokens t JOIN users u ON u.id=t.user_id "
+             "AND u.status='approved' AND u.credential_version=t.credential_version ")
+
+
 def _token_row(db, token_id: int):
-    return db.execute(
-        "SELECT t.*, u.email FROM api_tokens t JOIN users u ON u.id=t.user_id AND u.status='approved' "
-        "WHERE t.id=? AND t.revoked_at IS NULL AND t.expires_at>?",
-        (token_id, int(time.time())),
-    ).fetchone()
+    return db.execute(TOKEN_SQL + "WHERE t.id=? AND t.revoked_at IS NULL AND t.expires_at>?",
+                      (token_id, int(time.time()))).fetchone()
+
+
+def _mfa_missing(row) -> bool:
+    return bool(current_app.config.get("REQUIRE_2FA")) and not row["totp_enabled_at"]
 
 
 TOKEN_HEADER_RE = re.compile(r"^[Bb][Ee][Aa][Rr][Ee][Rr] (syn_[A-Za-z0-9_-]{40,80})$")
@@ -120,14 +127,14 @@ def _authenticate():
         _refuse_anonymous()
         raise _unauthorized("Jeton d'API manquant ou mal formé.")
     db = get_db()
-    row = db.execute(
-        "SELECT t.*, u.email FROM api_tokens t JOIN users u ON u.id=t.user_id AND u.status='approved' "
-        "WHERE t.token_hash=? AND t.revoked_at IS NULL AND t.expires_at>?",
-        (hash_token(value), int(time.time())),
-    ).fetchone()
+    row = db.execute(TOKEN_SQL + "WHERE t.token_hash=? AND t.revoked_at IS NULL AND t.expires_at>?",
+                     (hash_token(value), int(time.time()))).fetchone()
     if row is None:
         _refuse_anonymous()
         raise _unauthorized("Jeton d'API invalide, expiré ou révoqué.")
+    if _mfa_missing(row):
+        raise ApiError(403, "mfa_required", "Cette instance exige la double authentification : active-la dans "
+                                            "le tableau de bord, puis crée un nouveau jeton.")
     now = int(time.time())
     if not row["last_used_at"] or now - row["last_used_at"] >= 60:
         with db:
@@ -139,8 +146,11 @@ def _authenticate():
 
 def _guard(db) -> None:
     """Recontrôle du jeton et du compte sous le verrou qui accepte une écriture."""
-    if _token_row(db, g.api_token["id"]) is None:
+    row = _token_row(db, g.api_token["id"])
+    if row is None:
         raise actions.ActionError(401, "unauthorized", "Jeton d'API révoqué ou expiré pendant l'opération.")
+    if _mfa_missing(row):
+        raise actions.ActionError(403, "mfa_required", "Cette instance exige la double authentification.")
 
 
 def _audit(db, action: str, resource: str) -> None:

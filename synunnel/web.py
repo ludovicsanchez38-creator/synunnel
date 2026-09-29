@@ -8,8 +8,6 @@ import time
 from functools import wraps
 from urllib.parse import quote, urlsplit
 
-from argon2 import PasswordHasher
-from argon2.exceptions import VerifyMismatchError
 from flask import (
     Flask,
     abort,
@@ -26,13 +24,14 @@ from flask import (
 from flask.sessions import SecureCookieSessionInterface
 from werkzeug.middleware.proxy_fix import ProxyFix
 
-from . import VERSION_LABEL, actions, api
+from . import VERSION_LABEL, account, actions, api, security
+from .account import PASSWORDS
 from .db import allocate_id, close_db, get_db, init_db, now_iso
 from .dns import (
     system_reservations,
 )
+from .mailer import Mailer
 
-PASSWORDS = PasswordHasher()
 EMAIL_RE = actions.EMAIL_RE
 SESSION_MAX_AGE = 86400
 ACCESS_COOKIE = "__Host-synunnel-access"
@@ -69,19 +68,32 @@ def _login_required(fn):
     @wraps(fn)
     def wrapper(*args, **kwargs):
         if g.user is None:
+            if g.get("enrolling") is not None:
+                # Instance qui exige la 2FA : un compte sans facteur n'a accès qu'à son activation.
+                return redirect(url_for("security_page"))
             return redirect(url_for("login", next=request.url))
         return fn(*args, **kwargs)
     return wrapper
 
 
+def _web_guard(db) -> None:
+    """Recontrôle du compte sous le verrou d'écriture, comme l'API le fait pour ses jetons."""
+    row = db.execute("SELECT totp_enabled_at FROM users WHERE id=? AND status='approved' AND session_version=?",
+                     (g.user["id"], session.get("sv", -1))).fetchone()
+    if row is None or (account.require_2fa() and not row["totp_enabled_at"]):
+        raise actions.ActionError(401, "unauthorized", "Session expirée : reconnecte-toi.")
+
+
 def _authorized_protected_user(hostname: str, user_id: int) -> bool:
+    # Le visiteur (propriétaire ou invité) doit lui-même satisfaire l'exigence de 2FA de l'instance.
+    policy, params = account.policy_sql()
     return get_db().execute(
         "SELECT 1 FROM addresses a JOIN domains d ON d.id=a.domain_id "
-        "JOIN users u ON u.id=? AND u.status='approved' "
+        f"JOIN users u ON u.id=? AND u.status='approved' AND {policy} "
         "WHERE a.hostname=? AND a.protected=1 AND "
         "(d.user_id=u.id OR (a.shared=1 AND EXISTS ("
         "SELECT 1 FROM address_grants g WHERE g.address_id=a.id AND g.email=u.email)))",
-        (user_id, hostname),
+        (user_id, *params, hostname),
     ).fetchone() is not None
 
 
@@ -164,6 +176,14 @@ def create_app(config_override: dict | None = None) -> Flask:
         REGISTRATION_MODE=os.getenv("REGISTRATION_MODE", "invitation"),
         MAX_RECORDS_PER_DOMAIN=int(os.getenv("MAX_RECORDS_PER_DOMAIN", "200")),
         SYNC_COMMAND=os.getenv("SYNC_COMMAND", "/usr/bin/sudo -n /usr/local/sbin/synunnel-sync"),
+        # Clé dédiée au chiffrement des secrets TOTP (64 caractères hexadécimaux), distincte de SECRET_KEY.
+        TOTP_KEY=os.getenv("TOTP_KEY", ""),
+        REQUIRE_2FA=os.getenv("REQUIRE_2FA", "0") == "1",
+        SMTP_HOST=os.getenv("SMTP_HOST", ""),
+        SMTP_PORT=os.getenv("SMTP_PORT", "465"),
+        SMTP_USER=os.getenv("SMTP_USER", ""),
+        SMTP_FROM=os.getenv("SMTP_FROM", ""),
+        SMTP_PASSWORD_FILE=os.getenv("SMTP_PASSWORD_FILE", ""),
         PDNS_ENABLED=True,
         SESSION_COOKIE_NAME="__Host-synunnel",
         SESSION_COOKIE_SECURE=True,
@@ -176,6 +196,10 @@ def create_app(config_override: dict | None = None) -> Flask:
         app.config.update(config_override)
     if not app.config["SECRET_KEY"] or not app.config["ADMIN_TOKEN"]:
         raise RuntimeError("SECRET_KEY et ADMIN_TOKEN doivent être configurés hors du dépôt.")
+    try:
+        app.config["TOTP_KEY_BYTES"] = security.parse_key(app.config["TOTP_KEY"])
+    except ValueError as exc:
+        raise RuntimeError(str(exc)) from exc
     missing = [name for name in REQUIRED_SETTINGS if not app.config[name]]
     if missing:
         raise RuntimeError(f"Réglages de l'instance manquants : {', '.join(missing)}.")
@@ -184,6 +208,7 @@ def create_app(config_override: dict | None = None) -> Flask:
          *app.config["REDIRECT_HOSTS"].split(",")],
         app.config["EXTRA_RESERVED_DOMAINS"].split(","),
     )
+    app.extensions["synunnel_mailer"] = Mailer(app.config, lambda: app.config.get("MAIL_TRANSPORT"))
     app.session_interface = SessionInterface()
     app.wsgi_app = ProxyFix(app.wsgi_app, x_proto=1, x_host=1)
     api.register(app)
@@ -194,20 +219,29 @@ def create_app(config_override: dict | None = None) -> Flask:
     @app.before_request
     def before_request():
         g.user = None
+        g.enrolling = None
         if request.path.startswith("/api/"):
             # L'API s'authentifie par jeton uniquement : ni cookie ni jeton CSRF ici.
             return
         if "user_id" in session:
-            # La version de session change à chaque déconnexion : les autres navigateurs
-            # connectés au même compte perdent alors leur session.
-            g.user = get_db().execute(
-                "SELECT id,email,status FROM users WHERE id=? AND status='approved' AND session_version=?",
+            # La version de session change à chaque déconnexion et à chaque changement de
+            # justificatif : les autres navigateurs connectés au même compte perdent leur session.
+            row = get_db().execute(
+                "SELECT id,email,status,totp_enabled_at,email_verified_at,credential_version FROM users "
+                "WHERE id=? AND status='approved' AND session_version=?",
                 (session["user_id"], session.get("sv", -1)),
             ).fetchone()
-            if g.user is not None and int(time.time()) - session.get("auth_at", 0) > SESSION_MAX_AGE:
+            if row is not None and int(time.time()) - session.get("auth_at", 0) > SESSION_MAX_AGE:
                 # Durée absolue : même utilisée sans interruption, une session se renouvelle par un mot de passe.
-                g.user = None
-            if g.user is None:
+                row = None
+            if row is not None and row["totp_enabled_at"] and session.get("mfa") != 1:
+                # Compte à double authentification : une session qui ne l'a pas prouvée ne vaut rien.
+                row = None
+            if row is not None and not account.satisfies_policy(row):
+                g.enrolling = row
+            else:
+                g.user = row
+            if row is None:
                 session.clear()
         mutating = request.method in {"POST", "PUT", "PATCH", "DELETE"} and not request.path.startswith("/admin/api/")
         if mutating and not _same_secret(session.get("csrf", ""), request.form.get("csrf_token", "")):
@@ -218,6 +252,7 @@ def create_app(config_override: dict | None = None) -> Flask:
         if "csrf" not in session:
             session["csrf"] = secrets.token_urlsafe(32)
         return {"csrf_token": session["csrf"], "current_user": g.get("user"), "app_version": VERSION_LABEL,
+                "enrolling_user": g.get("enrolling"),
                 "invitation_mode": app.config["REGISTRATION_MODE"] != "approval"}
 
     @app.after_request
@@ -306,11 +341,8 @@ def create_app(config_override: dict | None = None) -> Flask:
                 or actions.limit_reached("login_email", email, 50, 900)):
             abort(429, "Trop de tentatives. Réessaie plus tard.")
         row = get_db().execute("SELECT * FROM users WHERE email=?", (email,)).fetchone()
-        try:
-            valid = PASSWORDS.verify(row["password_hash"] if row else DUMMY_HASH, request.form.get("password", ""))
-            valid = valid and row is not None
-        except VerifyMismatchError:
-            valid = False
+        valid = account.verify_password(row["password_hash"] if row else DUMMY_HASH, request.form.get("password", ""))
+        valid = valid and row is not None
         if not valid:
             for kind, key in (("login_ip", ip), ("login_pair", f"{email}|{ip}"), ("login_email", email)):
                 actions.record_attempt(kind, key)
@@ -319,22 +351,22 @@ def create_app(config_override: dict | None = None) -> Flask:
         if row["status"] != "approved":
             flash("Compte en attente de validation.", "error")
             return render_template("login.html", next_url=next_url), 403
-        session.clear()
-        session["user_id"] = row["id"]
-        session["sv"] = row["session_version"]
-        session["auth_at"] = int(time.time())
-        session["csrf"] = secrets.token_urlsafe(32)
-        session.permanent = True
+        if row["totp_enabled_at"]:
+            return account.begin_second_step(row, next_url)
+        account.open_session(row, mfa=False)
+        if not account.satisfies_policy(row):
+            return redirect(url_for("security_page"))
         return _redirect_after_login(next_url, row["id"])
 
     @app.post("/logout")
     def logout():
-        if g.user:
+        if g.user or g.enrolling:
             # Se déconnecter ferme aussi les accès ouverts sur les adresses protégées.
             with get_db() as db:
-                db.execute("UPDATE users SET session_version=session_version+1 WHERE id=?", (g.user["id"],))
-                db.execute("DELETE FROM host_sessions WHERE user_id=?", (g.user["id"],))
-                db.execute("DELETE FROM access_codes WHERE user_id=?", (g.user["id"],))
+                uid = (g.user or g.enrolling)["id"]
+                db.execute("UPDATE users SET session_version=session_version+1 WHERE id=?", (uid,))
+                db.execute("DELETE FROM host_sessions WHERE user_id=?", (uid,))
+                db.execute("DELETE FROM access_codes WHERE user_id=?", (uid,))
         session.clear()
         return redirect(url_for("login"))
 
@@ -344,6 +376,8 @@ def create_app(config_override: dict | None = None) -> Flask:
         return render_template("dashboard.html", **actions.account_overview(g.user["id"]))
 
     def _flash_error(exc: actions.ActionError):
+        if exc.status == 401:
+            abort(401)
         if exc.status == 404:
             abort(404)
         if exc.status == 429:
@@ -356,7 +390,7 @@ def create_app(config_override: dict | None = None) -> Flask:
         raw_selectors = request.form.get("selectors", "").replace(";", ",").split(",")
         try:
             claim, _created = actions.create_claim(app, g.user["id"], request.form.get("domain", ""), raw_selectors,
-                                         bool(request.form.get("mail_checked")))
+                                                   bool(request.form.get("mail_checked")), guard=_web_guard)
         except actions.ActionError as exc:
             _flash_error(exc)
             return redirect(url_for("dashboard"))
@@ -376,7 +410,7 @@ def create_app(config_override: dict | None = None) -> Flask:
     @_login_required
     def delete_claim(claim_id: int):
         try:
-            actions.cancel_claim(g.user["id"], claim_id)
+            actions.cancel_claim(g.user["id"], claim_id, guard=_web_guard)
         except actions.ActionError as exc:
             _flash_error(exc)
         else:
@@ -387,7 +421,7 @@ def create_app(config_override: dict | None = None) -> Flask:
     @_login_required
     def verify_claim(claim_id: int):
         try:
-            result = actions.verify_claim(app, g.user["id"], claim_id)
+            result = actions.verify_claim(app, g.user["id"], claim_id, guard=_web_guard)
         except actions.ActionError as exc:
             _flash_error(exc)
             return redirect(url_for("claim_detail", claim_id=claim_id))
@@ -410,7 +444,7 @@ def create_app(config_override: dict | None = None) -> Flask:
         try:
             actions.add_record(app, g.user["id"], domain_id, request.form.get("name", ""),
                                request.form.get("type", ""), request.form.get("content", ""),
-                               request.form.get("ttl", "3600"))
+                               request.form.get("ttl", "3600"), guard=_web_guard)
         except actions.ActionError as exc:
             _flash_error(exc)
         else:
@@ -421,7 +455,7 @@ def create_app(config_override: dict | None = None) -> Flask:
     @_login_required
     def delete_domain(domain_id: int):
         try:
-            result = actions.delete_domain(app, g.user["id"], domain_id)
+            result = actions.delete_domain(app, g.user["id"], domain_id, guard=_web_guard)
         except actions.ActionError as exc:
             _flash_error(exc)
             return redirect(url_for("domain_detail", domain_id=domain_id))
@@ -433,7 +467,7 @@ def create_app(config_override: dict | None = None) -> Flask:
     @_login_required
     def delete_record(domain_id: int, record_id: int):
         try:
-            actions.delete_record(app, g.user["id"], domain_id, record_id)
+            actions.delete_record(app, g.user["id"], domain_id, record_id, guard=_web_guard)
         except actions.ActionError as exc:
             _flash_error(exc)
         else:
@@ -444,7 +478,7 @@ def create_app(config_override: dict | None = None) -> Flask:
     @_login_required
     def add_machine():
         try:
-            machine = actions.create_machine(app, g.user["id"], request.form.get("name", ""))
+            machine = actions.create_machine(app, g.user["id"], request.form.get("name", ""), guard=_web_guard)
         except actions.ActionError as exc:
             _flash_error(exc)
             return redirect(url_for("dashboard"))
@@ -457,7 +491,7 @@ def create_app(config_override: dict | None = None) -> Flask:
     @_login_required
     def delete_machine(machine_id: int):
         try:
-            actions.delete_machine(app, g.user["id"], machine_id)
+            actions.delete_machine(app, g.user["id"], machine_id, guard=_web_guard)
         except actions.ActionError as exc:
             _flash_error(exc)
         else:
@@ -471,6 +505,7 @@ def create_app(config_override: dict | None = None) -> Flask:
             address = actions.create_address(
                 app, g.user["id"], request.form.get("domain_id", ""), request.form.get("machine_id", ""),
                 request.form.get("name", ""), request.form.get("port", ""), bool(request.form.get("protected")),
+                guard=_web_guard,
             )
         except actions.ActionError as exc:
             _flash_error(exc)
@@ -488,7 +523,7 @@ def create_app(config_override: dict | None = None) -> Flask:
         if request.method == "POST":
             try:
                 granted = actions.set_access(g.user["id"], address_id, bool(request.form.get("shared")),
-                                             request.form.get("emails", ""))
+                                             request.form.get("emails", ""), guard=_web_guard)
             except actions.ActionError as exc:
                 _flash_error(exc)
             else:
@@ -500,7 +535,7 @@ def create_app(config_override: dict | None = None) -> Flask:
     @_login_required
     def delete_address(address_id: int):
         try:
-            actions.delete_address(app, g.user["id"], address_id)
+            actions.delete_address(app, g.user["id"], address_id, guard=_web_guard)
         except actions.ActionError as exc:
             _flash_error(exc)
         else:
@@ -518,7 +553,7 @@ def create_app(config_override: dict | None = None) -> Flask:
         rows = [{**dict(row), "labels": [api.PERMISSIONS[item] for item in row["scopes"].split(",")
                                          if item in api.PERMISSIONS]} for row in rows]
         return render_template("tokens.html", tokens=rows, now=now, durations=api.TOKEN_DURATIONS,
-                               permissions=api.PERMISSIONS,
+                               with_factor=bool(g.user["totp_enabled_at"]), permissions=api.PERMISSIONS,
                                api_base=f"https://{app.config['DASHBOARD_HOST']}/api/v1")
 
     @app.post("/tokens")
@@ -532,15 +567,16 @@ def create_app(config_override: dict | None = None) -> Flask:
         except ValueError:
             days = 0
         db = get_db()
-        # Authentification récente exigée : le mot de passe est redemandé à chaque création.
-        row = db.execute("SELECT password_hash FROM users WHERE id=?", (g.user["id"],)).fetchone()
-        try:
-            password_ok = PASSWORDS.verify(row["password_hash"], request.form.get("password", ""))
-        except VerifyMismatchError:
-            password_ok = False
-        if not password_ok:
+        # Authentification récente exigée : le mot de passe (et le code de 2FA) est redemandé à chaque
+        # création. Les versions lues ici sont recontrôlées sous le verrou de l'insertion.
+        row = db.execute("SELECT password_hash, session_version, credential_version, totp_enabled_at FROM users "
+                         "WHERE id=?", (g.user["id"],)).fetchone()
+        if not account.verify_password(row["password_hash"], request.form.get("password", "")):
             flash("Mot de passe incorrect.", "error")
             return redirect(url_for("tokens"))
+        with_factor = bool(row["totp_enabled_at"])
+        if with_factor and account.mfa_limited(g.user["id"]):
+            abort(429, "Trop de tentatives. Réessaie plus tard.")
         try:
             name = actions.clean_label(name, 60, "Nom")
         except actions.ActionError:
@@ -552,6 +588,17 @@ def create_app(config_override: dict | None = None) -> Flask:
         now = int(time.time())
         with db:
             db.execute("BEGIN IMMEDIATE")
+            if account.locked_user(db, g.user["id"], row["session_version"], row["credential_version"]) is None:
+                # Mot de passe, 2FA ou statut changés pendant la vérification : aucun jeton n'est créé.
+                db.rollback()
+                flash("Tes identifiants ont changé pendant l'opération : recommence.", "error")
+                return redirect(url_for("tokens"))
+            if with_factor and not account.consume_factor(db, g.user["id"], request.form.get("code", ""),
+                                                          row["credential_version"]):
+                db.rollback()
+                account.mfa_failed(g.user["id"])
+                flash("Code de double authentification incorrect.", "error")
+                return redirect(url_for("tokens"))
             active = db.execute(
                 "SELECT COUNT(*) FROM api_tokens WHERE user_id=? AND revoked_at IS NULL AND expires_at>?",
                 (g.user["id"], now),
@@ -561,10 +608,10 @@ def create_app(config_override: dict | None = None) -> Flask:
                 flash(f"{api.MAX_ACTIVE_TOKENS} jetons actifs au plus : révoque d'abord un jeton.", "error")
                 return redirect(url_for("tokens"))
             token_id = db.execute(
-                "INSERT INTO api_tokens(user_id,name,token_hash,prefix,scopes,created_at,expires_at) "
-                "VALUES(?,?,?,?,?,?,?)",
+                "INSERT INTO api_tokens(user_id,name,token_hash,prefix,scopes,created_at,expires_at,"
+                "credential_version) VALUES(?,?,?,?,?,?,?,?)",
                 (g.user["id"], name, api.hash_token(value), value[:10], ",".join(sorted(set(chosen))), now_iso(),
-                 now + days * 86400),
+                 now + days * 86400, row["credential_version"]),
             ).lastrowid
             db.execute("INSERT INTO api_audit(at,user_id,token_id,action,resource) VALUES(?,?,?,?,?)",
                        (now_iso(), g.user["id"], token_id, "token.create", f"token:{token_id}"))
@@ -700,6 +747,37 @@ def create_app(config_override: dict | None = None) -> Flask:
                        (_hash_token(code), email, now_iso(), expires))
         return jsonify({"email": email, "code": code, "expires_at": expires})
 
+    @app.post("/admin/api/users/<int:user_id>/recovery")
+    @admin_required
+    def admin_recovery(user_id: int):
+        """Ticket de récupération (mot de passe, 2FA ou les deux), à remettre par un canal connu."""
+        email = _decision_email()
+        data = request.get_json(silent=True)
+        scope = data.get("scope") if isinstance(data, dict) else None
+        if scope not in account.SCOPES:
+            return jsonify({"error": "scope vaut password, 2fa ou both"}), 422
+        issued = account.issue_ticket(user_id, email, scope)
+        if issued is None:
+            return jsonify({"error": "compte approuvé introuvable pour cette adresse"}), 404
+        return jsonify({"id": user_id, "email": email, "scope": scope, **issued,
+                        "url": f"https://{app.config['DASHBOARD_HOST']}/recover"})
+
+    @app.post("/admin/api/users/<int:user_id>/verify-email")
+    @admin_required
+    def admin_verify_email(user_id: int):
+        """L'administrateur atteste, après vérification humaine, que la boîte appartient au titulaire."""
+        email = _decision_email()
+        db = get_db()
+        with db:
+            db.execute("BEGIN IMMEDIATE")
+            cursor = db.execute("UPDATE users SET email_verified_at=COALESCE(email_verified_at, ?) "
+                                "WHERE id=? AND email=? AND status='approved'", (now_iso(), user_id, email))
+            if cursor.rowcount != 1:
+                db.rollback()
+                return jsonify({"error": "compte approuvé introuvable pour cette adresse"}), 404
+            account.record_event(db, user_id, "email.verify", via="admin", actor="admin")
+        return jsonify({"id": user_id, "email": email, "email_verified": True})
+
     @app.post("/admin/api/users/<int:user_id>/suspend")
     @admin_required
     def admin_suspend(user_id: int):
@@ -707,16 +785,14 @@ def create_app(config_override: dict | None = None) -> Flask:
         db = get_db()
         with db:
             db.execute("BEGIN IMMEDIATE")
-            cursor = db.execute(
-                "UPDATE users SET status='pending', session_version=session_version+1 WHERE id=? AND status='approved'",
-                (user_id,),
-            )
+            cursor = db.execute("UPDATE users SET status='pending' WHERE id=? AND status='approved'", (user_id,))
             if cursor.rowcount != 1:
                 db.rollback()
                 return jsonify({"error": "compte approuvé introuvable"}), 404
-            db.execute("DELETE FROM host_sessions WHERE user_id=?", (user_id,))
-            db.execute("DELETE FROM access_codes WHERE user_id=?", (user_id,))
-            db.execute("UPDATE api_tokens SET revoked_at=? WHERE user_id=? AND revoked_at IS NULL", (now_iso(), user_id))
+            # Nouvelle version des justificatifs : jetons d'API, tickets et liens émis avant la
+            # suspension restent morts même après une réapprobation.
+            account.invalidate_credentials(db, user_id)
+            account.record_event(db, user_id, "account.suspend", actor="admin")
         # Routes et pairs du compte disparaissent de Caddy et de WireGuard à la synchronisation.
         synced = actions.project_runtime(app)
         return jsonify({"id": user_id, "status": "suspended", "synced": synced})
@@ -752,11 +828,12 @@ def create_app(config_override: dict | None = None) -> Flask:
             return "", 204
         token = request.cookies.get(ACCESS_COOKIE, "")
         if token:
+            policy, params = account.policy_sql()
             found = get_db().execute(
                 "SELECT s.user_id FROM host_sessions s JOIN users u ON u.id=s.user_id "
-                "AND u.session_version=s.session_version "
+                f"AND u.session_version=s.session_version AND {policy} "
                 "WHERE s.token_hash=? AND s.hostname=? AND s.expires_at>?",
-                (_hash_token(token), hostname, int(time.time())),
+                (*params, _hash_token(token), hostname, int(time.time())),
             ).fetchone()
             if found and _authorized_protected_user(hostname, found["user_id"]):
                 return "", 204
@@ -773,11 +850,12 @@ def create_app(config_override: dict | None = None) -> Flask:
         if not code or len(code) > 128:
             abort(403)
         db = get_db()
+        policy, params = account.policy_sql()
         row = db.execute(
             "SELECT c.user_id,c.hostname,c.next_path,c.session_version FROM access_codes c "
             "JOIN users u ON u.id=c.user_id AND u.status='approved' AND u.session_version=c.session_version "
-            "WHERE c.code_hash=? AND c.hostname=? AND c.expires_at>?",
-            (_hash_token(code), hostname, int(time.time())),
+            f"AND {policy} WHERE c.code_hash=? AND c.hostname=? AND c.expires_at>?",
+            (*params, _hash_token(code), hostname, int(time.time())),
         ).fetchone()
         if row is None or not _authorized_protected_user(hostname, row["user_id"]):
             abort(403)
@@ -796,4 +874,5 @@ def create_app(config_override: dict | None = None) -> Flask:
         response.headers["Cache-Control"] = "no-store"
         return response
 
+    account.register(app, _redirect_after_login)
     return app

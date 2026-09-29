@@ -1,5 +1,6 @@
 """SQLite : source de vérité des comptes et des routes."""
 
+import os
 import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
@@ -133,6 +134,62 @@ CREATE TABLE IF NOT EXISTS id_counters (
     name TEXT PRIMARY KEY,
     last INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS totp_enrollments (
+    user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    enrollment_hash TEXT NOT NULL,
+    secret_enc TEXT NOT NULL,
+    credential_version INTEGER NOT NULL,
+    session_version INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS recovery_codes (
+    id INTEGER PRIMARY KEY,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    code_hash TEXT NOT NULL,
+    used_at INTEGER,
+    UNIQUE(user_id, code_hash)
+);
+CREATE TABLE IF NOT EXISTS login_challenges (
+    challenge_hash TEXT PRIMARY KEY,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    session_version INTEGER NOT NULL,
+    credential_version INTEGER NOT NULL,
+    next_url TEXT NOT NULL DEFAULT '',
+    expires_at INTEGER NOT NULL,
+    used_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_login_challenges_expiry ON login_challenges(expires_at);
+CREATE TABLE IF NOT EXISTS password_resets (
+    token_hash TEXT PRIMARY KEY,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL CHECK(kind IN ('email', 'admin')),
+    scope TEXT NOT NULL CHECK(scope IN ('password', '2fa', 'both')),
+    credential_version INTEGER NOT NULL,
+    created_at INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL,
+    used_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_password_resets_user ON password_resets(user_id);
+CREATE INDEX IF NOT EXISTS idx_password_resets_expiry ON password_resets(expires_at);
+CREATE TABLE IF NOT EXISTS email_verifications (
+    token_hash TEXT PRIMARY KEY,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    email TEXT NOT NULL,
+    credential_version INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL,
+    used_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_email_verifications_expiry ON email_verifications(expires_at);
+CREATE TABLE IF NOT EXISTS security_events (
+    id INTEGER PRIMARY KEY,
+    at TEXT NOT NULL,
+    user_id INTEGER,
+    actor TEXT NOT NULL,
+    event TEXT NOT NULL,
+    via TEXT NOT NULL DEFAULT '',
+    ip TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_security_events_at ON security_events(at);
 CREATE TABLE IF NOT EXISTS admin_audit (
     id INTEGER PRIMARY KEY,
     at TEXT NOT NULL,
@@ -184,6 +241,16 @@ def close_db(_error: BaseException | None = None) -> None:
         conn.close()
 
 
+def _private_files(path: Path) -> None:
+    """Base et journaux en 0600 : la base porte des empreintes et des secrets chiffrés."""
+    for candidate in (path, Path(f"{path}-wal"), Path(f"{path}-shm")):
+        try:
+            if candidate.exists() and candidate.stat().st_uid == os.getuid():
+                candidate.chmod(0o600)
+        except OSError:
+            pass
+
+
 def init_db() -> None:
     path = Path(current_app.config["DATABASE"])
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -214,4 +281,16 @@ def init_db() -> None:
     for table in ("users", "access_codes", "host_sessions"):
         if "session_version" not in {row[1] for row in db.execute(f"PRAGMA table_info({table})")}:
             db.execute(f"ALTER TABLE {table} ADD COLUMN session_version INTEGER NOT NULL DEFAULT 0")
+    user_columns = {row[1] for row in db.execute("PRAGMA table_info(users)")}
+    for column in ("credential_version INTEGER NOT NULL DEFAULT 0", "totp_secret_enc TEXT", "totp_enabled_at TEXT",
+                   "totp_last_step INTEGER NOT NULL DEFAULT 0", "email_verified_at TEXT"):
+        if column.split()[0] not in user_columns:
+            db.execute(f"ALTER TABLE users ADD COLUMN {column}")
+    if "credential_version" not in {row[1] for row in db.execute("PRAGMA table_info(api_tokens)")}:
+        # Les jetons existants reçoivent la version courante de leur compte : ils restent valables
+        # jusqu'au prochain changement de justificatif, qui les rendra caducs.
+        db.execute("ALTER TABLE api_tokens ADD COLUMN credential_version INTEGER NOT NULL DEFAULT 0")
+        db.execute("UPDATE api_tokens SET credential_version="
+                   "(SELECT credential_version FROM users WHERE users.id=api_tokens.user_id)")
     db.commit()
+    _private_files(path)

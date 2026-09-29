@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+{% block title %}Vérifier l'adresse{% endblock %}
+{% block content %}
+<section class="auth-layout">
+  <div class="intro"><span class="eyebrow">Adresse de récupération</span><h1>Confirmer ton adresse</h1><p>Une fois vérifiée, ton adresse pourra recevoir un lien de réinitialisation si tu oublies ton mot de passe.</p></div>
+  <div class="card auth-card"><h2>Confirmer</h2>
+    <form method="post" action="{{ url_for('email_verify_confirm') }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}"><input type="hidden" name="token" value="{{ token }}">
+      <button class="button" type="submit">Confirmer mon adresse</button>
+    </form>
+  </div>
+</section>
+{% endblock %}

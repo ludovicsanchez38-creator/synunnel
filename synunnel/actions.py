@@ -601,10 +601,10 @@ def peer_settings(app: Flask, ip: str) -> dict:
             "endpoint": app.config["WG_ENDPOINT"], "allowed_ips": "10.88.0.1/32", "persistent_keepalive": 25}
 
 
-def create_machine(app: Flask, user_id: int, name_raw: str) -> dict:
+def create_machine(app: Flask, user_id: int, name_raw: str, guard: Guard = None) -> dict:
     """Tableau de bord : la paire est générée ici et la clé privée montrée une seule fois à l'humain."""
     private_key, public_key = generate_keypair()
-    machine = _insert_machine(app, user_id, name_raw, public_key, None)
+    machine = _insert_machine(app, user_id, name_raw, public_key, guard)
     peer = peer_settings(app, machine["ip"])
     machine["config"] = (
         "[Interface]\n"

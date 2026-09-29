@@ -14,6 +14,8 @@ INSTANCE = {
     # Les tests historiques passent par l'inscription libre puis l'approbation ; le mode
     # invitation (par défaut en production) a ses propres tests.
     "REGISTRATION_MODE": "approval",
+    # Clé de test des secrets TOTP : jamais celle d'une instance.
+    "TOTP_KEY": "11" * 32,
 }
 
 

@@ -17,6 +17,7 @@
       <label>Mot de passe<input type="password" name="password" autocomplete="current-password" required></label>
       <button class="button" type="submit">Se connecter</button>
     </form>
+    <p class="small"><a href="{{ url_for('forgot') }}">Mot de passe oublié ?</a></p>
     <p class="small">Pas encore de compte ? <a href="{{ url_for('register') }}">{% if invitation_mode %}J'ai un code d'invitation{% else %}Demander un accès{% endif %}</a></p>
   </div>
 </section>

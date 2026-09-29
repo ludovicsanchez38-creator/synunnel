@@ -12,6 +12,7 @@ import subprocess
 import time
 from pathlib import Path
 
+import pytest
 from test_api import ALL, PASSWORD, account, app, bearer, create_token, key  # noqa: F401
 from test_app import add_domain, csrf, register_approve_login
 
@@ -403,3 +404,259 @@ def test_import_and_records_are_bounded_and_valid(app, monkeypatch):
                  {"name": "_" + "a" * 63, "type": "TXT", "content": "long"}):
         assert client.post(f"/api/v1/domains/{domain_id}/records", headers=bearer(token),
                            json=body).status_code == 422, body
+
+
+# ---------------------------------------------------------------- revue Codex du design 2FA (C1 à C16)
+
+def _mfa():
+    import test_mfa
+    return test_mfa
+
+
+def test_c1_activation_ends_password_only_sessions_and_accesses(app, monkeypatch):
+    mfa = _mfa()
+    clock = {"now": 1_790_000_010.0}
+    monkeypatch.setattr("synunnel.account._now", lambda: clock["now"])
+    client = account(app, "c1@example.net")
+    other = app.test_client()
+    assert mfa.password_step(other, "c1@example.net").status_code == 302
+    token = create_token(client)
+    domain_id = add_domain(client, "c1.example.net")
+    with app.app_context():
+        db = get_db()
+        uid = db.execute("SELECT id FROM users").fetchone()[0]
+        db.execute("INSERT INTO machines(id,user_id,name,ip,public_key,created_at) VALUES(900,?,?,?,?,?)",
+                   (uid, "m", "10.88.0.9", key(9), "x"))
+        db.commit()
+    client.post("/addresses", data={"csrf_token": csrf(client), "domain_id": domain_id, "machine_id": 900,
+                                     "name": "nas", "port": "80", "protected": "1"})
+    with app.app_context():
+        db = get_db()
+        db.execute("INSERT INTO host_sessions(token_hash,user_id,hostname,expires_at,session_version) "
+                   "SELECT ?, id, 'nas.c1.example.net', ?, session_version FROM users",
+                   (hashlib.sha256(b"ancien-acces").hexdigest(), int(time.time()) + 3600))
+        db.commit()
+    mfa.enroll(client, clock)
+    assert client.get("/dashboard").status_code == 200
+    assert other.get("/dashboard").status_code == 302
+    assert client.get("/api/v1/me", headers=bearer(token)).status_code == 401
+    with app.app_context():
+        assert get_db().execute("SELECT COUNT(*) FROM host_sessions").fetchone()[0] == 0
+
+
+def test_c2_require_2fa_applies_to_protected_addresses(app, monkeypatch):
+    client = account(app, "c2@example.net")
+    domain_id = add_domain(client, "c2.example.net")
+    with app.app_context():
+        db = get_db()
+        uid = db.execute("SELECT id FROM users").fetchone()[0]
+        db.execute("INSERT INTO machines(id,user_id,name,ip,public_key,created_at) VALUES(901,?,?,?,?,?)",
+                   (uid, "m", "10.88.0.10", key(10), "x"))
+        db.commit()
+    client.post("/addresses", data={"csrf_token": csrf(client), "domain_id": domain_id, "machine_id": 901,
+                                     "name": "nas", "port": "80", "protected": "1"})
+    with app.app_context():
+        db = get_db()
+        route = db.execute("SELECT route_token FROM addresses").fetchone()[0]
+        db.execute("INSERT INTO host_sessions(token_hash,user_id,hostname,expires_at,session_version) "
+                   "SELECT ?, id, 'nas.c2.example.net', ?, session_version FROM users",
+                   (hashlib.sha256(b"acces-ouvert").hexdigest(), int(time.time()) + 3600))
+        db.commit()
+    visitor = app.test_client()
+    visitor.set_cookie("__Host-synunnel-access", "acces-ouvert", domain="nas.c2.example.net", secure=True)
+    path = f"/internal/caddy/auth?route={route}"
+    assert visitor.get(path, base_url="https://nas.c2.example.net").status_code == 204
+    app.config["REQUIRE_2FA"] = True
+    assert visitor.get(path, base_url="https://nas.c2.example.net").status_code == 302
+
+
+def test_c3_token_creation_racing_a_credential_change_yields_no_token(app, monkeypatch):
+    client = account(app, "c3@example.net")
+    from synunnel import account as accounts
+    real = accounts.verify_password
+
+    def verify_then_change(hash_value, password):
+        result = real(hash_value, password)
+        with app.app_context():
+            db = get_db()
+            db.execute("UPDATE users SET credential_version=credential_version+1")
+            db.commit()
+        return result
+
+    monkeypatch.setattr(accounts, "verify_password", verify_then_change)
+    assert create_token(client) is None
+    with app.app_context():
+        assert get_db().execute("SELECT COUNT(*) FROM api_tokens").fetchone()[0] == 0
+
+
+def test_c3_web_mutation_rechecks_the_account_under_lock(app, monkeypatch):
+    client = account(app, "c3web@example.net")
+    from synunnel import actions
+    real = actions.normalize_domain
+
+    def suspend_then_normalize(*args, **kwargs):
+        with app.app_context():
+            db = get_db()
+            db.execute("UPDATE users SET status='pending', session_version=session_version+1")
+            db.commit()
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(actions, "normalize_domain", suspend_then_normalize)
+    client.post("/domains", data={"csrf_token": csrf(client), "domain": "c3web.example.net", "mail_checked": "1"})
+    with app.app_context():
+        assert get_db().execute("SELECT COUNT(*) FROM domain_claims").fetchone()[0] == 0
+
+
+def test_c4_failed_codes_are_limited_across_challenges(app, monkeypatch):
+    mfa = _mfa()
+    clock = {"now": 1_790_000_010.0}
+    monkeypatch.setattr("synunnel.account._now", lambda: clock["now"])
+    client = account(app, "c4@example.net")
+    secret, _ = mfa.enroll(client, clock)
+    for attempt in range(5):
+        browser = app.test_client()  # nouveau challenge à chaque fois : le compteur ne repart pas de zéro
+        assert mfa.password_step(browser, "c4@example.net").status_code == 302
+        bad = mfa.totp(secret, clock, offset=5)
+        assert browser.post("/login/2fa", data={"csrf_token": csrf(browser), "code": bad}).status_code == 401, attempt
+    browser = app.test_client()
+    assert mfa.password_step(browser, "c4@example.net").status_code == 302
+    clock["now"] += 30
+    assert browser.post("/login/2fa", data={"csrf_token": csrf(browser),
+                                            "code": mfa.totp(secret, clock)}).status_code == 429
+
+
+def test_c6_suspension_kills_recovery_tickets_for_good(app):
+    client = account(app, "c6@example.net")
+    admin = {"Authorization": "Bearer test-admin-token-only"}
+    with app.app_context():
+        uid = get_db().execute("SELECT id FROM users").fetchone()[0]
+    ticket = client.post(f"/admin/api/users/{uid}/recovery", headers=admin,
+                         json={"email": "c6@example.net", "scope": "password"}).json["ticket"]
+    assert client.post(f"/admin/api/users/{uid}/suspend", headers=admin).status_code == 200
+    assert client.post(f"/admin/api/users/{uid}/approve", headers=admin, json={"email": "c6@example.net"}).status_code == 200
+    visitor = app.test_client()
+    assert visitor.post("/recover", data={"csrf_token": csrf(visitor), "email": "c6@example.net", "ticket": ticket,
+                                          "new_password": "nouveau-mot-de-passe-456"}).status_code == 400
+
+
+def test_c7_consumed_or_expired_challenge_is_refused(app, monkeypatch):
+    mfa = _mfa()
+    clock = {"now": 1_790_000_010.0}
+    monkeypatch.setattr("synunnel.account._now", lambda: clock["now"])
+    client = account(app, "c7@example.net")
+    secret, _ = mfa.enroll(client, clock)
+    browser = app.test_client()
+    assert mfa.password_step(browser, "c7@example.net").status_code == 302
+    with browser.session_transaction() as state:
+        old = dict(state)
+    clock["now"] += 30
+    assert browser.post("/login/2fa", data={"csrf_token": csrf(browser), "code": mfa.totp(secret, clock)}).status_code == 302
+    replay = app.test_client()
+    with replay.session_transaction() as state:
+        state.update(old)  # l'ancien cookie de session partielle, rejoué
+    clock["now"] += 30
+    refused = replay.post("/login/2fa", data={"csrf_token": old["csrf"], "code": mfa.totp(secret, clock)})
+    assert refused.status_code == 302 and refused.headers["Location"].endswith("/login")
+    assert replay.get("/dashboard").status_code == 302
+    slow = app.test_client()
+    assert mfa.password_step(slow, "c7@example.net").status_code == 302
+    clock["now"] += 301
+    late = slow.post("/login/2fa", data={"csrf_token": csrf(slow), "code": mfa.totp(secret, clock)})
+    assert late.status_code == 302 and late.headers["Location"].endswith("/login")
+
+
+def test_c9_a_login_code_cannot_authorize_another_action(app, monkeypatch):
+    mfa = _mfa()
+    clock = {"now": 1_790_000_010.0}
+    monkeypatch.setattr("synunnel.account._now", lambda: clock["now"])
+    client = account(app, "c9@example.net")
+    secret, _ = mfa.enroll(client, clock)
+    browser = app.test_client()
+    assert mfa.login_2fa(browser, "c9@example.net", secret, clock).status_code == 302
+    same = mfa.totp(secret, clock)
+    browser.post("/security/2fa/disable", data={"csrf_token": csrf(browser), "password": PASSWORD, "code": same})
+    with app.app_context():
+        assert get_db().execute("SELECT totp_enabled_at FROM users").fetchone()[0]
+
+
+def test_c14_smtp_is_implicit_tls_with_verified_certificate(app, monkeypatch, tmp_path):
+    import ssl
+
+    from synunnel.mailer import Mailer
+    captured = {}
+
+    class FakeSMTP:
+        def __init__(self, host, port, context=None, timeout=None):
+            captured.update(host=host, port=port, context=context, timeout=timeout)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def login(self, user, password):
+            captured.update(user=user, password=password)
+
+        def send_message(self, message, from_addr=None, to_addrs=None):
+            captured.update(message=message, from_addr=from_addr, to_addrs=to_addrs)
+
+    monkeypatch.setattr("synunnel.mailer.smtplib.SMTP_SSL", FakeSMTP)
+    secret_file = tmp_path / "smtp-password"
+    secret_file.write_text("mot de passe \"avec\" $(espaces)\n")
+    mailer = Mailer({"SMTP_HOST": "smtp.mail.ovh.net", "SMTP_PORT": "465", "SMTP_USER": "noreply@synunnel.fr",
+                     "SMTP_FROM": "noreply@synunnel.fr", "SMTP_PASSWORD_FILE": str(secret_file)})
+    assert mailer.enabled
+    mailer.send_now("dest@example.net", "Objet", "Corps")
+    assert captured["host"] == "smtp.mail.ovh.net" and captured["port"] == 465
+    assert captured["context"].verify_mode == ssl.CERT_REQUIRED and captured["context"].check_hostname
+    assert captured["password"] == 'mot de passe "avec" $(espaces)'
+    assert captured["to_addrs"] == ["dest@example.net"] and captured["from_addr"] == "noreply@synunnel.fr"
+    for bad in ("dest@example.net\r\nBcc: x@y.z", "pas-une-adresse"):
+        with pytest.raises(ValueError):
+            mailer.send_now(bad, "Objet", "Corps")
+    assert not Mailer({"SMTP_HOST": "smtp.mail.ovh.net", "SMTP_PORT": "587", "SMTP_USER": "a@b.c",
+                       "SMTP_FROM": "a@b.c", "SMTP_PASSWORD_FILE": str(secret_file)}).enabled
+
+
+def test_c14_installer_generates_totp_key_and_never_sources_the_smtp_password():
+    script = (ROOT / "scripts/install.sh").read_text()
+    assert "TOTP_KEY" in script and "openssl rand -hex 32" in script
+    assert re.search(r"grep -q '\^TOTP_KEY=' /etc/synunnel/synunnel.env", script)
+    assert "source \"$SMTP_PASSWORD_FILE\"" not in script and ". \"$SMTP_PASSWORD_FILE\"" not in script
+    assert "SMTP_PORT" in script and "465" in script
+
+
+def test_c15_security_changes_are_audited_and_reset_attempts_bounded(app, monkeypatch):
+    client = account(app, "c15@example.net")
+    client.post("/security/password", data={"csrf_token": csrf(client), "password": PASSWORD,
+                                            "new_password": "nouveau-mot-de-passe-456"})
+    with app.app_context():
+        events = [row[0] for row in get_db().execute("SELECT event FROM security_events")]
+    assert "password.change" in events
+    visitor = app.test_client()
+    statuses = [visitor.post("/reset", data={"csrf_token": csrf(visitor), "token": "faux" * 11,
+                                             "email": "c15@example.net", "password": "nouveau-mot-de-passe-789"}
+                             ).status_code for _ in range(11)]
+    assert statuses[:10] == [400] * 10 and statuses[10] == 429
+
+
+def test_c16_migration_is_idempotent_and_reconcile_purges(app, monkeypatch):
+    from synunnel.db import init_db
+    with app.app_context():
+        init_db()
+        init_db()
+    client = account(app, "c16@example.net")
+    assert client.get("/dashboard").status_code == 200
+    with app.app_context():
+        db = get_db()
+        db.execute("INSERT INTO login_challenges(challenge_hash,user_id,session_version,credential_version,next_url,"
+                   "expires_at) SELECT 'vieux', id, 0, 0, '', 1 FROM users")
+        db.commit()
+    monkeypatch.setattr("synunnel.create_app", lambda: app)
+    reconcile = runpy.run_path(str(ROOT / "scripts/reconcile.py"))
+    monkeypatch.setitem(reconcile["main"].__globals__, "create_app", lambda: app)
+    monkeypatch.setitem(reconcile["main"].__globals__, "project_runtime", lambda _app: True)
+    reconcile["main"]()
+    with app.app_context():
+        assert get_db().execute("SELECT COUNT(*) FROM login_challenges").fetchone()[0] == 0

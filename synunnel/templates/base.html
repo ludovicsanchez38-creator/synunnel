@@ -22,7 +22,12 @@
         {% if current_user %}
           <a href="{{ url_for('dashboard') }}">Tableau de bord</a>
           <a href="{{ url_for('tokens') }}">Jetons d'API</a>
+          <a href="{{ url_for('security_page') }}">Sécurité</a>
           <span class="identity">{{ current_user.email }}</span>
+          <form class="inline" action="{{ url_for('logout') }}" method="post"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="text-button" type="submit">Déconnexion</button></form>
+        {% elif enrolling_user %}
+          <a href="{{ url_for('security_page') }}">Sécurité</a>
+          <span class="identity">{{ enrolling_user.email }}</span>
           <form class="inline" action="{{ url_for('logout') }}" method="post"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="text-button" type="submit">Déconnexion</button></form>
         {% else %}
           <a class="nav-secondary" href="{{ url_for('login') }}">Connexion</a>

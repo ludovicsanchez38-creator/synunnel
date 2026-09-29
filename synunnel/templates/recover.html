@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+{% block title %}Ticket de récupération{% endblock %}
+{% block content %}
+<section class="auth-layout">
+  <div class="intro"><span class="eyebrow">Récupération</span><h1>Utiliser un ticket de l'administrateur</h1>
+    <p>Le ticket, valable 24 heures et utilisable une fois, porte sur ton mot de passe, ta double authentification, ou les deux.</p>
+    <p class="muted">Ticket pour la double authentification seule : saisis ton mot de passe actuel. Ticket pour le mot de passe : choisis-en un nouveau. Toutes tes sessions seront fermées et tes jetons d'API révoqués.</p></div>
+  <div class="card auth-card"><h2>Ticket</h2>
+    <form method="post" action="{{ url_for('recover') }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <label>Adresse mail du compte<input type="email" name="email" autocomplete="email" required></label>
+      <label>Ticket<input name="ticket" autocomplete="off" required></label>
+      <label>Mot de passe actuel <span class="hint">ticket pour la double authentification</span><input type="password" name="password" autocomplete="current-password"></label>
+      <label>Nouveau mot de passe <span class="hint">ticket pour le mot de passe, 12 caractères minimum</span><input type="password" name="new_password" autocomplete="new-password"></label>
+      <button class="button" type="submit">Utiliser le ticket</button>
+    </form>
+  </div>
+</section>
+{% endblock %}

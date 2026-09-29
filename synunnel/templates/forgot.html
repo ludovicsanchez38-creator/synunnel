@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% block title %}Mot de passe oublié{% endblock %}
+{% block content %}
+<section class="auth-layout">
+  <div class="intro"><span class="eyebrow">Mot de passe oublié</span><h1>Retrouver l'accès à ton compte</h1>
+    <p>Si ton adresse a été vérifiée, un lien de réinitialisation valable 30 minutes y part. Ta double authentification, si elle est active, reste exigée ensuite.</p>
+    <p class="muted">Adresse jamais vérifiée, ou téléphone perdu ? L'administrateur de l'instance peut te remettre un ticket de récupération.</p></div>
+  <div class="card auth-card"><h2>Recevoir un lien</h2>
+    {% if mail_enabled %}<form method="post" action="{{ url_for('forgot') }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <label>Adresse mail<input type="email" name="email" autocomplete="email" required></label>
+      <button class="button" type="submit">Envoyer le lien</button>
+    </form>{% else %}<p>Cette instance n'envoie pas de mails : demande un ticket de récupération à l'administrateur.</p>{% endif %}
+    <p class="small"><a href="{{ url_for('recover') }}">J'ai un ticket de récupération</a> · <a href="{{ url_for('login') }}">Se connecter</a></p>
+  </div>
+</section>
+{% endblock %}

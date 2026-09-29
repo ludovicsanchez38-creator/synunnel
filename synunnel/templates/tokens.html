@@ -10,6 +10,7 @@
       <fieldset class="permissions"><legend>Il peut modifier</legend>{% for key, label in permissions.items() %}<label class="check"><input type="checkbox" name="permissions" value="{{ key }}" checked><span>{{ label }}</span></label>{% endfor %}<p class="small">Tout décocher donne un jeton en lecture seule.</p></fieldset>
       <label>Durée<select name="days" required>{% for days in durations %}<option value="{{ days }}"{% if days == 30 %} selected{% endif %}>{{ days }} jours</option>{% endfor %}</select></label>
       <label>Ton mot de passe <span class="hint">redemandé à chaque création</span><input type="password" name="password" autocomplete="current-password" required></label>
+      {% if with_factor %}<label>Code à six chiffres <span class="hint">double authentification</span><input name="code" inputmode="numeric" autocomplete="one-time-code" maxlength="32" required></label>{% endif %}
       <button class="button" type="submit">Créer le jeton</button>
     </form>
   </section>

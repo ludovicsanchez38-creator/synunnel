@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block title %}Nouveau mot de passe{% endblock %}
+{% block content %}
+<section class="auth-layout">
+  <div class="intro"><span class="eyebrow">Réinitialisation</span><h1>Choisis un nouveau mot de passe</h1><p>Toutes tes sessions seront fermées et tes jetons d'API révoqués. Ta double authentification, si elle est active, restera exigée à la connexion.</p></div>
+  <div class="card auth-card"><h2>Nouveau mot de passe</h2>
+    <form method="post" action="{{ url_for('reset_password') }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}"><input type="hidden" name="token" value="{{ token }}">
+      <label>Adresse mail du compte<input type="email" name="email" autocomplete="email" required></label>
+      <label>Nouveau mot de passe <span class="hint">12 caractères minimum</span><input type="password" name="password" minlength="12" autocomplete="new-password" required></label>
+      <button class="button" type="submit">Changer le mot de passe</button>
+    </form>
+    <p class="small"><a href="{{ url_for('forgot') }}">Demander un nouveau lien</a></p>
+  </div>
+</section>
+{% endblock %}

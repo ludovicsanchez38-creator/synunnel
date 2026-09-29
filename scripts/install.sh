@@ -29,7 +29,8 @@ if [[ -e /etc/synunnel/synunnel.env ]]; then
   set +a
 fi
 for setting in PUBLIC_IPV4 PUBLIC_IPV6 DASHBOARD_HOST NS1_HOST NS2_HOST ACME_EMAIL SOA_RNAME REDIRECT_HOSTS \
-  RESERVED_DOMAINS MAX_DOMAINS_PER_USER MAX_MACHINES_PER_USER MAX_ADDRESSES_PER_USER MAX_RECORDS_PER_DOMAIN; do
+  RESERVED_DOMAINS MAX_DOMAINS_PER_USER MAX_MACHINES_PER_USER MAX_ADDRESSES_PER_USER MAX_RECORDS_PER_DOMAIN \
+  REQUIRE_2FA SMTP_HOST SMTP_PORT SMTP_USER SMTP_FROM SMTP_PASSWORD_FILE; do
   if [[ "${!setting:-}" == *[$'\n\r']* ]]; then
     printf '%s ne doit pas contenir de retour à la ligne.\n' "$setting" >&2
     exit 1
@@ -52,6 +53,32 @@ MAX_MACHINES_PER_USER="${MAX_MACHINES_PER_USER:-10}"
 MAX_ADDRESSES_PER_USER="${MAX_ADDRESSES_PER_USER:-50}"
 MAX_RECORDS_PER_DOMAIN="${MAX_RECORDS_PER_DOMAIN:-200}"
 REGISTRATION_MODE="${REGISTRATION_MODE:-invitation}"
+# Double authentification exigée de tous les comptes (1) ou proposée (0).
+REQUIRE_2FA="${REQUIRE_2FA:-0}"
+# Envoi des mails (mot de passe oublié, alertes de sécurité) : SMTPS sur le port 465 seulement.
+# Le mot de passe SMTP vit dans son propre fichier (SMTP_PASSWORD_FILE), jamais dans l'environnement.
+SMTP_HOST="${SMTP_HOST:-}"
+SMTP_PORT="${SMTP_PORT:-465}"
+SMTP_USER="${SMTP_USER:-}"
+SMTP_FROM="${SMTP_FROM:-}"
+SMTP_PASSWORD_FILE="${SMTP_PASSWORD_FILE:-}"
+if [[ "$REQUIRE_2FA" != 0 && "$REQUIRE_2FA" != 1 ]]; then
+  printf 'REQUIRE_2FA vaut 0 ou 1.\n' >&2
+  exit 1
+fi
+if [[ "$SMTP_PORT" != 465 ]]; then
+  printf 'SMTP_PORT vaut 465 : seul SMTPS (TLS implicite) est pris en charge.\n' >&2
+  exit 1
+fi
+MAIL_RE='^[A-Za-z0-9._+-]+@[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$'
+SMTP_HOST_RE='^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$'
+if [[ -n "$SMTP_HOST$SMTP_USER$SMTP_FROM$SMTP_PASSWORD_FILE" ]]; then
+  if [[ ! "$SMTP_HOST" =~ $SMTP_HOST_RE || ! "$SMTP_USER" =~ $MAIL_RE || ! "$SMTP_FROM" =~ $MAIL_RE \
+        || ! "$SMTP_PASSWORD_FILE" =~ ^/[A-Za-z0-9._/-]+$ ]]; then
+    printf 'SMTP : SMTP_HOST, SMTP_USER, SMTP_FROM et SMTP_PASSWORD_FILE vont ensemble et doivent être valides.\n' >&2
+    exit 1
+  fi
+fi
 if [[ "$REGISTRATION_MODE" != invitation && "$REGISTRATION_MODE" != approval ]]; then
   printf 'REGISTRATION_MODE vaut invitation ou approval.\n' >&2
   exit 1
@@ -164,19 +191,39 @@ MAX_MACHINES_PER_USER=$MAX_MACHINES_PER_USER
 MAX_ADDRESSES_PER_USER=$MAX_ADDRESSES_PER_USER
 MAX_RECORDS_PER_DOMAIN=$MAX_RECORDS_PER_DOMAIN
 REGISTRATION_MODE=$REGISTRATION_MODE
+REQUIRE_2FA=$REQUIRE_2FA
+SMTP_HOST=$SMTP_HOST
+SMTP_PORT=$SMTP_PORT
+SMTP_USER=$SMTP_USER
+SMTP_FROM=$SMTP_FROM
+SMTP_PASSWORD_FILE=$SMTP_PASSWORD_FILE
 SYNC_COMMAND='/usr/bin/sudo -n /usr/local/sbin/synunnel-sync'
 EOF
+fi
+# Clé de chiffrement des secrets TOTP : générée une fois, jamais écrasée (la perdre rend illisibles
+# les secrets déjà enregistrés, et les comptes concernés passent par un ticket de récupération).
+if ! grep -q '^TOTP_KEY=' /etc/synunnel/synunnel.env; then
+  printf 'TOTP_KEY=%s\n' "$(openssl rand -hex 32)" >> /etc/synunnel/synunnel.env
 fi
 # Une instance antérieure peut ne pas avoir toutes les clés : on complète le fichier sans rien écraser.
 for setting in PUBLIC_IPV4 PUBLIC_IPV6 DASHBOARD_HOST NS1_HOST NS2_HOST SOA_RNAME REDIRECT_HOSTS ACME_EMAIL \
   RESERVED_DOMAINS MAX_DOMAINS_PER_USER MAX_MACHINES_PER_USER MAX_ADDRESSES_PER_USER MAX_RECORDS_PER_DOMAIN \
-  REGISTRATION_MODE; do
+  REGISTRATION_MODE REQUIRE_2FA SMTP_HOST SMTP_PORT SMTP_USER SMTP_FROM SMTP_PASSWORD_FILE; do
   if ! grep -q "^${setting}=" /etc/synunnel/synunnel.env; then
     printf '%s=%s\n' "$setting" "${!setting}" >> /etc/synunnel/synunnel.env
   fi
 done
 chown root:synunnel /etc/synunnel/synunnel.env
 chmod 0640 /etc/synunnel/synunnel.env
+# Le fichier du mot de passe SMTP n'est jamais lu par ce script : on ne fait qu'en fixer les droits.
+if [[ -n "$SMTP_PASSWORD_FILE" ]]; then
+  if [[ -L "$SMTP_PASSWORD_FILE" || ! -f "$SMTP_PASSWORD_FILE" || "$(stat -c %U "$SMTP_PASSWORD_FILE")" != root ]]; then
+    printf '%s doit être un fichier ordinaire de root (mot de passe SMTP seul).\n' "$SMTP_PASSWORD_FILE" >&2
+    exit 1
+  fi
+  chown root:synunnel "$SMTP_PASSWORD_FILE"
+  chmod 0640 "$SMTP_PASSWORD_FILE"
+fi
 set -a
 # Fichier généré par ce script, possédé par root.
 source /etc/synunnel/synunnel.env

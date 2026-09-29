@@ -1,6 +1,6 @@
 [project]
 name = "synunnel"
-version = "0.1.0a1"
+version = "0.2.0a1"
 description = "Tunnel personnel avec DNS délégué, HTTPS et WireGuard"
 requires-python = ">=3.12"
 dependencies = [
@@ -9,6 +9,8 @@ dependencies = [
   "dnspython>=2.6,<3",
   "requests>=2.31,<3",
   "gunicorn>=22,<24",
+  "cryptography>=42,<47",
+  "segno>=1.6,<2",
 ]
 
 [project.optional-dependencies]

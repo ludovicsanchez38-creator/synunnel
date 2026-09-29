@@ -37,6 +37,12 @@ def main() -> int:
             db.execute("DELETE FROM domain_claims WHERE created_at < strftime('%Y-%m-%dT%H:%M:%S', 'now', '-30 days')")
             db.execute("DELETE FROM admin_audit WHERE at < strftime('%Y-%m-%dT%H:%M:%S', 'now', ?)", (cutoff,))
             db.execute("DELETE FROM api_audit WHERE at < strftime('%Y-%m-%dT%H:%M:%S', 'now', ?)", (cutoff,))
+            # Preuves de courte durée : l'expiration est vérifiée à l'usage, la purge ne fait que ranger.
+            db.execute("DELETE FROM login_challenges WHERE expires_at < ? OR used_at IS NOT NULL", (now,))
+            db.execute("DELETE FROM totp_enrollments WHERE expires_at < ?", (now,))
+            db.execute("DELETE FROM password_resets WHERE expires_at < ?", (now - 86400,))
+            db.execute("DELETE FROM email_verifications WHERE expires_at < ?", (now - 86400,))
+            db.execute("DELETE FROM security_events WHERE at < strftime('%Y-%m-%dT%H:%M:%S', 'now', '-365 days')")
         # 2. Tunnel et routes : rapides, et indépendants de PowerDNS.
         if not project_runtime(app):
             failures += 1

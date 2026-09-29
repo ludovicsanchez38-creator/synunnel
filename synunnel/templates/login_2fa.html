@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block title %}Double authentification{% endblock %}
+{% block content %}
+<section class="auth-layout">
+  <div class="intro"><span class="eyebrow">Deuxième étape</span><h1>Ton code de double authentification</h1><p>Ouvre l'application de codes de ton téléphone et saisis le code à six chiffres affiché pour Synunnel.</p><p class="muted">Téléphone perdu ? Un code de secours fonctionne aussi, une seule fois chacun.</p></div>
+  <div class="card auth-card"><h2>Code</h2>
+    <form method="post" action="{{ url_for('login_2fa') }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <label>Code à six chiffres ou code de secours<input name="code" inputmode="numeric" autocomplete="one-time-code" maxlength="32" required autofocus></label>
+      <button class="button" type="submit">Valider</button>
+    </form>
+    <p class="small"><a href="{{ url_for('login') }}">Recommencer la connexion</a></p>
+  </div>
+</section>
+{% endblock %}

@@ -1,0 +1,8 @@
+{% extends "base.html" %}
+{% block title %}Codes de secours{% endblock %}
+{% block content %}
+<section class="page-head"><span class="eyebrow">Affichage unique</span><h1>Tes codes de secours</h1><p>Chacun remplace une fois le code de ton téléphone, si tu le perds. Range-les maintenant dans ton gestionnaire de mots de passe ou sur papier : ils ne seront plus jamais affichés, et Synunnel n'en garde qu'une empreinte.</p></section>
+<section class="card secret-card"><h2>Dix codes, un usage chacun</h2>
+  <ul class="recovery-list">{% for code in codes %}<li class="recovery-code">{{ code }}</li>{% endfor %}</ul>
+  <a class="button" href="{{ url_for('security_page') }}">J'ai rangé mes codes</a></section>
+{% endblock %}
