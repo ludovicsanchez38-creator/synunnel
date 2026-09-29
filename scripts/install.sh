@@ -322,13 +322,14 @@ EOF
 chown root:pdns /etc/powerdns/pdns.d/synunnel.conf
 chmod 0640 /etc/powerdns/pdns.d/synunnel.conf
 
+# Dépendances figées : versions et empreintes de requirements.lock (généré depuis uv.lock par
+# `uv export --frozen --no-dev --no-emit-project`), paquets binaires seulement, sans outils de
+# développement ni installation éditable. L'environnement neuf est construit et vérifié à côté de
+# l'ancien, qui continue de servir ; la bascule n'a lieu qu'une fois Caddy validé et les unités écrites.
+VENV_NEW="$REPO_DIR/.venv.new"
 (
   # L'environnement Python doit rester lisible par le service et par les tests.
   umask 022
-  # Dépendances figées : versions et empreintes de requirements.lock (généré depuis uv.lock par
-  # `uv export --frozen --no-dev --no-emit-project`), paquets binaires seulement, sans outils de
-  # développement ni installation éditable. Un environnement neuf remplace l'ancien, gardé en .venv.prev.
-  VENV_NEW="$REPO_DIR/.venv.new"
   if [[ -e "$VENV_NEW" ]]; then
     python3 -c 'import shutil, sys; shutil.rmtree(sys.argv[1])' "$VENV_NEW"
   fi
@@ -339,17 +340,29 @@ chmod 0640 /etc/powerdns/pdns.d/synunnel.conf
   PURELIB="$("$VENV_NEW/bin/python" -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"
   printf '%s\n' "$REPO_DIR" > "$PURELIB/synunnel-repo.pth"
   (cd / && "$VENV_NEW/bin/python" -c 'import synunnel, cryptography, gunicorn') >/dev/null
-  if [[ -e "$REPO_DIR/.venv.prev" ]]; then
-    python3 -c 'import shutil, sys; shutil.rmtree(sys.argv[1])' "$REPO_DIR/.venv.prev"
-  fi
-  if [[ -e "$REPO_DIR/.venv" ]]; then
-    mv "$REPO_DIR/.venv" "$REPO_DIR/.venv.prev"
-  fi
-  mv "$VENV_NEW" "$REPO_DIR/.venv"
-  # Renommé, l'environnement garde un interpréteur valide (lien vers celui du système) mais ses scripts
-  # de console pointent encore vers .venv.new : les services passent donc par `python -m`.
-  (cd / && "$REPO_DIR/.venv/bin/python" -m gunicorn --version) >/dev/null
 )
+
+# Bascule de l'environnement : l'ancien devient .venv.prev (gardé pour un retour rapide), le neuf .venv.
+# Si le second renommage échoue, l'ancien est remis en place. Renommé, l'environnement garde un
+# interpréteur valide (lien vers celui du système) mais ses scripts de console pointent encore vers
+# .venv.new : les services passent donc par `python -m`.
+swap_venv() {
+  local repo="$1"
+  if [[ -e "$repo/.venv.prev" ]]; then
+    python3 -c 'import shutil, sys; shutil.rmtree(sys.argv[1])' "$repo/.venv.prev"
+  fi
+  if [[ -e "$repo/.venv" ]]; then
+    mv "$repo/.venv" "$repo/.venv.prev"
+  fi
+  if ! mv "$repo/.venv.new" "$repo/.venv"; then
+    if [[ -e "$repo/.venv.prev" && ! -e "$repo/.venv" ]]; then
+      mv "$repo/.venv.prev" "$repo/.venv"
+    fi
+    printf "Bascule de l'environnement Python impossible : l'ancien est remis en place.\n" >&2
+    return 1
+  fi
+  (cd / && "$repo/.venv/bin/python" -m gunicorn --version) >/dev/null
+}
 
 install -o root -g root -m 0755 "$REPO_DIR/scripts/synunnel-sync.py" /usr/local/sbin/synunnel-sync
 cat > /etc/sudoers.d/synunnel <<'EOF'
@@ -366,7 +379,7 @@ if [[ ! -s /etc/caddy/synunnel-routes.caddy ]]; then
   chmod 0644 /etc/caddy/synunnel-routes.caddy
 fi
 CADDY_CANDIDATE="$(mktemp /etc/caddy/.synunnel-caddy.XXXXXX)"
-"$REPO_DIR/.venv/bin/python" "$REPO_DIR/scripts/render-caddy.py" "$REPO_DIR/config/Caddyfile" "$CADDY_CANDIDATE"
+"$VENV_NEW/bin/python" "$REPO_DIR/scripts/render-caddy.py" "$REPO_DIR/config/Caddyfile" "$CADDY_CANDIDATE"
 caddy validate --config "$CADDY_CANDIDATE" --adapter caddyfile
 if ! cmp -s "$CADDY_CANDIDATE" /etc/caddy/Caddyfile; then
   if [[ -e /etc/caddy/Caddyfile ]]; then
@@ -383,6 +396,9 @@ install -o root -g root -m 0644 "$REPO_DIR/config/wg0-firewall.nft" /etc/synunne
 install -d -o root -g root -m 0755 /etc/systemd/system/caddy.service.d
 install -o root -g root -m 0644 "$REPO_DIR/config/caddy-synunnel.conf" /etc/systemd/system/caddy.service.d/synunnel.conf
 
+# Caddy validé, unités écrites (elles lancent `python -m gunicorn`, valable avec l'ancien comme avec le
+# nouvel environnement) : la bascule peut avoir lieu, juste avant le rechargement.
+swap_venv "$REPO_DIR"
 systemctl daemon-reload
 # Redémarrage complet : l'API d'administration de Caddy change de place (socket réservé à Caddy),
 # un simple rechargement ne la déplacerait pas.

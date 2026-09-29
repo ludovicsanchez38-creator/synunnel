@@ -205,4 +205,38 @@ def test_services_start_through_the_venv_interpreter_not_a_console_script():
             if line.startswith("ExecStart="):
                 assert line.startswith("ExecStart=@REPO_DIR@/.venv/bin/python "), (unit.name, line)
     installer = (root / "scripts" / "install.sh").read_text()
-    assert '"$REPO_DIR/.venv/bin/python" -m gunicorn --version' in installer
+    assert '"$repo/.venv/bin/python" -m gunicorn --version' in installer
+
+
+def _installer() -> str:
+    from pathlib import Path
+
+    return (Path(__file__).resolve().parent.parent / "scripts" / "install.sh").read_text()
+
+
+def test_environment_is_swapped_only_once_caddy_and_units_are_ready():
+    """Constat 5 de la revue Codex : bascule avant la validation Caddy et l'écriture des unités, une instance
+    arrêtée entre les deux ne redémarrait plus (ancienne unité, scripts du nouvel environnement cassés)."""
+    script = _installer()
+    build = script.index('python3 -m venv "$VENV_NEW"')
+    validate = script.index('caddy validate --config "$CADDY_CANDIDATE"')
+    units = script.index('> "/etc/systemd/system/$unit"')
+    swap = script.index('swap_venv "$REPO_DIR"')
+    reload = script.index("systemctl daemon-reload")
+    assert build < validate < units < swap < reload
+    assert 'mv "$VENV_NEW" "$REPO_DIR/.venv"' not in script[:swap]
+
+
+def test_failed_swap_puts_the_previous_environment_back(tmp_path):
+    import subprocess
+
+    script = _installer()
+    function = "swap_venv() {" + script.split("swap_venv() {", 1)[1].split("\n}\n", 1)[0] + "\n}\n"
+    repo = tmp_path / "depot"
+    (repo / ".venv").mkdir(parents=True)
+    (repo / ".venv" / "ancien").write_text("x")
+    # Pas de .venv.new : le second renommage échoue, l'ancien environnement doit revenir.
+    run = subprocess.run(["bash", "-c", function + f'swap_venv "{repo}"'], capture_output=True, text=True,
+                         check=False)
+    assert run.returncode != 0
+    assert (repo / ".venv" / "ancien").exists() and not (repo / ".venv.prev").exists()
