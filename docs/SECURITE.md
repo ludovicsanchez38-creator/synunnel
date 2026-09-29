@@ -41,6 +41,13 @@
 **Isolation entre comptes**
 - Domaines, enregistrements, machines, adresses et listes d'invités sont filtrés par propriétaire ; les tests essaient explicitement des lectures et modifications croisées entre deux comptes.
 
+**Accès invité par code mail**
+- Option par adresse protégée, désactivée par défaut (y compris pour les adresses existantes à la mise à niveau), pour des personnes **sans compte** listées par le propriétaire : un code à 6 chiffres part depuis la boîte d'envoi de l'instance. Une adresse qui correspond à un compte, quel que soit son statut, ou à une adresse bloquée ne reçoit jamais de code : le propriétaire et tout titulaire de compte passent par leur compte et sa 2FA.
+- Coupé quand l'instance exige la 2FA (`REQUIRE_2FA=1`), sauf choix explicite `GUEST_CODES_WITH_2FA=1` : un invité n'a qu'un facteur, sa boîte mail. `GUEST_CODES=0` coupe l'accès invité sur toute l'instance.
+- Tables séparées (challenges, codes de transfert, sessions d'hôte), jamais de `user_id` : un invité ne devient jamais un compte. Chaque preuve porte `(adresse, jeton de route, guest_version)` ; `guest_version` change à toute modification de la liste, du partage ou de l'option et à la suspension du propriétaire : un accès retiré puis rétabli, ou une suspension suivie d'une réapprobation, ne ressuscite rien. La politique est revérifiée à chaque requête.
+- Un challenge est toujours créé, réel ou factice (adresse non invitée, option coupée, quotas atteints) : même réponse, même travail à la vérification ; un factice ne s'échange jamais. Le code n'est gardé qu'en MAC HMAC-SHA256. 10 minutes, 5 essais par challenge, 3 challenges vivants au plus, budget de 5 échecs par 24 h et par couple (adresse, email) : au plus 5 chances sur un million par jour pour un attaquant qui connaît l'adresse d'un invité. Quotas atomiques : 10 demandes par heure et par IP (429), 5 par email et un budget d'envoi interne par hôte (au-delà, challenges factices sans rien changer à la réponse), 30 vérifications par quart d'heure et par IP.
+- Sortie de l'invité par `POST /__synunnel/logout` (jeton de formulaire lié à la session d'hôte), qui ne ferme que cet hôte. Caddy réserve `/__synunnel/*` à Synunnel et retire le cookie d'accès de l'en-tête `Cookie` avant de joindre le service de la machine. Une adresse publiée n'atteint l'application que par `/__synunnel/*` et `/internal/caddy/*`.
+
 **Adresses protégées**
 - Un visiteur est renvoyé vers le tableau de bord, puis revient avec un code à usage unique de deux minutes, stocké sous forme d'empreinte, et un cookie limité à cet hôte (12 heures).
 - L'autorisation est relue à chaque requête HTTP ; modifier la liste d'invités révoque codes et sessions de l'adresse.
@@ -72,7 +79,8 @@
 
 - **Un seul serveur DNS, pas de DNSSEC.** Si le VPS tombe, les domaines délégués cessent de répondre, messagerie comprise. Un enregistrement DS laissé chez le registrar casse la résolution.
 - **Copie DNS incomplète par nature.** Le DNS public ne liste ni tous les sous-domaines ni tous les sélecteurs DKIM. Le joker vers le VPS peut capter un nom oublié, par exemple l'hôte d'un MX. Comparer la zone à l'export du fournisseur actuel avant de déléguer.
-- **Cookie d'accès transmis au service.** Pour une adresse protégée, le cookie Synunnel de cet hôte accompagne les requêtes jusqu'au service de la machine. Un service qui journalise ou renvoie les cookies l'exposerait jusqu'à son expiration.
+- **Cookie d'accès.** Caddy le retire avant le service de la machine (vérifié sur Caddy 2.6.2). Il reste rejouable pendant ses 12 heures par qui le déroberait dans le navigateur : le code à usage unique ne protège que l'ouverture.
+- **Accès invité.** Un seul facteur, la boîte mail de l'invité : à réserver aux services qui le supportent. Quelqu'un qui connaît l'adresse d'un invité peut le priver de code pendant 24 heures en épuisant son budget d'échecs ; l'invité peut toujours recevoir un compte Synunnel.
 - **WebSocket.** Une connexion WebSocket déjà ouverte n'est pas recontrôlée à chaque message : retirer un invité ne la coupe pas.
 - **Ressources.** Les limites de débit sont par compte et par adresse, pas globales, et une rafale simultanée peut les dépasser de quelques requêtes ; une instance ouverte à beaucoup de comptes demanderait une limite globale en amont. Les refus anonymes de l'API d'administration sont comptés sans être journalisés en base.
 - **Identifiants antérieurs à la mise à niveau.** Les compteurs d'identifiants sont amorcés avec une marge de 1 000 au-dessus du plus grand identifiant présent ; un identifiant supprimé avant la mise à niveau et situé au-delà de cette marge pourrait théoriquement revenir.

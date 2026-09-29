@@ -10,6 +10,8 @@ Comptes plus sûrs, sur un design revu par une passe adversariale de Codex (NO-G
 - Tickets de récupération émis par l'administrateur (mot de passe, double authentification ou les deux), consommés à l'usage ; attestation d'adresse par l'administrateur.
 - Version des justificatifs : jetons d'API, liens, tickets et sessions meurent au premier changement de mot de passe, de double authentification ou à la suspension.
 - Mutations du tableau de bord et création de jetons recontrôlées sous verrou ; journal `security_events`, notifications de sécurité, base en 0600.
+- Accès invité par code à 6 chiffres envoyé par mail, pour des personnes sans compte, option par adresse désactivée par défaut ; challenges réels et factices indiscernables, budget d'échecs, quotas atomiques, sortie par `/__synunnel/logout`.
+- Caddy : chemins `/__synunnel/*` réservés à Synunnel, cookie d'accès retiré avant le service de la machine.
 - Page de connexion : textes selon le mode d'inscription (invitation ou approbation).
 
 ## 0.1.0a1 - 29 septembre 2026
