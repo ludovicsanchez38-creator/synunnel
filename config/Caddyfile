@@ -22,10 +22,12 @@ https:// {
             }
         }
     }
+    # __REDIRECT_START__
     @synunnel_redirect host __REDIRECT_HOSTS__
     handle @synunnel_redirect {
         redir https://__DASHBOARD_HOST__{uri} 308
     }
+    # __REDIRECT_END__
     import /etc/caddy/synunnel-routes.caddy
     handle {
         respond "Adresse inconnue" 403

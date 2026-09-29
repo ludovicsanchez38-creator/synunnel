@@ -15,17 +15,34 @@ fi
 
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
-apt-get install -y pdns-server pdns-backend-sqlite3 caddy wireguard python3-venv python3-pip dnsutils acl
+apt-get install -y pdns-server pdns-backend-sqlite3 caddy wireguard nftables python3-venv python3-pip \
+  dnsutils acl ufw curl openssl
 
-# Paramètres remplaçables au premier lancement : sudo env PUBLIC_IPV4=... ./scripts/install.sh
-PUBLIC_IPV4="${PUBLIC_IPV4:-51.254.137.231}"
-PUBLIC_IPV6="${PUBLIC_IPV6-2001:41d0:305:2100::f36e}"
-DASHBOARD_HOST="${DASHBOARD_HOST:-synunnel.fr}"
-NS1_HOST="${NS1_HOST:-ns1.synunnel.fr}"
-NS2_HOST="${NS2_HOST:-ns2.synunnel.fr}"
-SOA_RNAME="${SOA_RNAME:-hostmaster.synunnel.fr.}"
-REDIRECT_HOSTS="${REDIRECT_HOSTS:-synunnel.com,www.synunnel.com}"
-ACME_EMAIL="${ACME_EMAIL:-ludo@synoptia.fr}"
+# Paramètres de l'instance. Premier lancement :
+#   sudo env PUBLIC_IPV4=203.0.113.10 DASHBOARD_HOST=tunnel.example.org \
+#     NS1_HOST=ns1.example.org NS2_HOST=ns2.example.org ACME_EMAIL=admin@example.org ./scripts/install.sh
+# Lancements suivants : les valeurs déjà écrites dans /etc/synunnel/synunnel.env font foi.
+if [[ -e /etc/synunnel/synunnel.env ]]; then
+  set -a
+  # Fichier généré par ce script lors d'un lancement précédent, possédé par root.
+  source /etc/synunnel/synunnel.env
+  set +a
+fi
+missing=()
+for setting in PUBLIC_IPV4 DASHBOARD_HOST NS1_HOST NS2_HOST ACME_EMAIL; do
+  if [[ -z "${!setting:-}" ]]; then missing+=("$setting"); fi
+done
+if (( ${#missing[@]} )); then
+  printf 'Paramètres manquants : %s\nVoir la section Installation du README.\n' "${missing[*]}" >&2
+  exit 1
+fi
+PUBLIC_IPV6="${PUBLIC_IPV6:-}"
+SOA_RNAME="${SOA_RNAME:-hostmaster.${DASHBOARD_HOST}.}"
+REDIRECT_HOSTS="${REDIRECT_HOSTS:-}"
+if [[ ! "$REPO_DIR" =~ ^[A-Za-z0-9._/-]+$ ]]; then
+  printf 'Le chemin du dépôt ne doit contenir ni espace ni caractère spécial : %s\n' "$REPO_DIR" >&2
+  exit 1
+fi
 python3 -c 'import ipaddress,sys; ipaddress.IPv4Address(sys.argv[1]); sys.argv[2] and ipaddress.IPv6Address(sys.argv[2])' "$PUBLIC_IPV4" "$PUBLIC_IPV6"
 for hostname in "$DASHBOARD_HOST" "$NS1_HOST" "$NS2_HOST"; do
   if [[ ! "$hostname" =~ ^[a-z0-9.-]+$ || "$hostname" != *.* ]]; then
@@ -41,7 +58,15 @@ fi
 if ! id synunnel >/dev/null 2>&1; then
   useradd --system --home /var/lib/synunnel --shell /usr/sbin/nologin synunnel
 fi
-setfacl -m u:synunnel:--x /home/ubuntu
+# Le service lit le dépôt là où il a été cloné : on lui ouvre seulement la traversée des
+# répertoires parents qui ne sont pas déjà traversables par tous.
+parent="$(dirname "$REPO_DIR")"
+while [[ "$parent" != / ]]; do
+  if [[ "$(stat -c %A "$parent")" != ?????????[xt] ]]; then
+    setfacl -m u:synunnel:--x "$parent"
+  fi
+  parent="$(dirname "$parent")"
+done
 install -d -o synunnel -g synunnel -m 0750 /var/lib/synunnel
 install -d -o root -g synunnel -m 0750 /etc/synunnel
 install -d -o pdns -g pdns -m 0755 /var/lib/powerdns
@@ -139,8 +164,12 @@ EOF
 chmod 0440 /etc/sudoers.d/synunnel
 visudo -cf /etc/sudoers.d/synunnel
 
-if [[ ! -e /etc/caddy/synunnel-routes.caddy ]]; then
-  install -o root -g root -m 0644 /dev/null /etc/caddy/synunnel-routes.caddy
+# Caddy refuse d'importer un fichier vide : on amorce avec la ligne d'en-tête que
+# synunnel-sync écrira ensuite à chaque synchronisation.
+if [[ ! -s /etc/caddy/synunnel-routes.caddy ]]; then
+  printf '# Routes générées depuis la base Synunnel. Ne pas éditer à la main.\n' > /etc/caddy/synunnel-routes.caddy
+  chown root:root /etc/caddy/synunnel-routes.caddy
+  chmod 0644 /etc/caddy/synunnel-routes.caddy
 fi
 CADDY_CANDIDATE="$(mktemp /etc/caddy/.synunnel-caddy.XXXXXX)"
 "$REPO_DIR/.venv/bin/python" "$REPO_DIR/scripts/render-caddy.py" "$REPO_DIR/config/Caddyfile" "$CADDY_CANDIDATE"
@@ -152,7 +181,9 @@ if ! cmp -s "$CADDY_CANDIDATE" /etc/caddy/Caddyfile; then
   install -o root -g root -m 0644 "$CADDY_CANDIDATE" /etc/caddy/Caddyfile
 fi
 python3 -c 'import pathlib,sys; pathlib.Path(sys.argv[1]).unlink()' "$CADDY_CANDIDATE"
-install -o root -g root -m 0644 "$REPO_DIR/config/synunnel.service" /etc/systemd/system/synunnel.service
+sed "s#@REPO_DIR@#$REPO_DIR#g" "$REPO_DIR/config/synunnel.service" > /etc/systemd/system/synunnel.service
+chmod 0644 /etc/systemd/system/synunnel.service
+install -o root -g root -m 0644 "$REPO_DIR/config/wg0-firewall.nft" /etc/synunnel/wg0-firewall.nft
 
 systemctl daemon-reload
 systemctl enable --now pdns
@@ -166,10 +197,16 @@ for attempt in 1 2 3 4 5; do
 done
 curl --silent --fail http://127.0.0.1:8000/login >/dev/null
 /usr/local/sbin/synunnel-sync
+# Le tunnel doit revenir seul après un redémarrage du VPS.
+systemctl enable wg-quick@wg0
+# Mise à niveau d'une instance dont wg0 tournait déjà : on applique le pare-feu sans couper le tunnel.
+if ip link show wg0 >/dev/null 2>&1; then nft -f /etc/synunnel/wg0-firewall.nft; fi
 caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
 systemctl enable --now caddy
 systemctl reload caddy
 
+# Ports publics nécessaires. UFW n'est pas activé par ce script : l'activer sans connaître
+# l'accès SSH de la machine pourrait couper l'administrateur.
 ufw allow 53/tcp
 ufw allow 53/udp
 ufw allow 80/tcp
@@ -177,4 +214,8 @@ ufw allow 443/tcp
 ufw allow 51820/udp
 
 printf 'Synunnel installé. Tableau de bord : https://%s (après ajout des DNS).\n' "$DASHBOARD_HOST"
+if ! ufw status | grep -q '^Status: active'; then
+  printf 'Attention : UFW est inactif. Autorise ton port SSH (ufw allow 22/tcp) puis lance ufw enable.\n'
+  printf 'Le tunnel reste filtré par sa propre table nftables (synunnel_wg).\n'
+fi
 printf 'Jeton admin : /etc/synunnel/synunnel.env, à lire uniquement sur le VPS par une personne autorisée.\n'

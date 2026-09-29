@@ -3,11 +3,16 @@
 
 import os
 import sqlite3
+from pathlib import Path
 
 from synunnel.dns import PowerDNS, configured_nameservers
 
 
 def main() -> None:
+    if not Path(os.environ["DATABASE"]).exists():
+        # Première installation : la base sera créée au premier démarrage du service.
+        print("Aucune base existante : aucune zone à aligner.")
+        return
     db = sqlite3.connect(f"file:{os.environ['DATABASE']}?mode=ro", uri=True)
     names = [row[0] for row in db.execute("SELECT name FROM domains ORDER BY name")]
     db.close()
