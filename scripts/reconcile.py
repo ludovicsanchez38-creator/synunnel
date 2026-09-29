@@ -15,6 +15,7 @@ import requests
 from synunnel import create_app
 from synunnel.actions import _pdns, project_runtime, project_zone, refresh_delegation, remove_zone
 from synunnel.db import get_db
+from synunnel.dns import delegation_status, still_designated
 
 RETENTION_DAYS = 90
 BUDGET_SECONDS = 200
@@ -52,9 +53,16 @@ def main() -> int:
             failures += 1
             print("Synchronisation WireGuard et Caddy en échec.", file=sys.stderr)
         # 3. Zones de domaines supprimés, pas encore retirées de PowerDNS, dans le budget.
+        nameservers = (f"{app.config['NS1_HOST']}.", f"{app.config['NS2_HOST']}.")
         for row in db.execute("SELECT name FROM zone_removals ORDER BY at").fetchall():
             if time.monotonic() - started > BUDGET_SECONDS:
                 break
+            # Retrait rejoué après un échec : la délégation a pu revenir vers l'instance entre-temps. Une zone
+            # encore désignée, ou dont la délégation ne se vérifie pas, est gardée et revue au passage suivant.
+            if still_designated(*delegation_status(row["name"], nameservers), nameservers) is not False:
+                print(f"Zone {row['name']} gardée : la délégation désigne encore l'instance ou ne se vérifie pas.",
+                      file=sys.stderr)
+                continue
             if not remove_zone(app, row["name"]):
                 failures += 1
                 print(f"Zone {row['name']} supprimée en base, pas encore dans PowerDNS.", file=sys.stderr)

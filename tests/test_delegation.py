@@ -195,3 +195,32 @@ def test_an_older_observation_never_overwrites_a_newer_one(app):
         domain = db.execute("SELECT * FROM domains WHERE id=?", (domain_id,)).fetchone()
         actions.refresh_delegation(app, domain)  # relevé courant (False) plus ancien que celui en base
         assert db.execute("SELECT delegation_active FROM domains WHERE id=?", (domain_id,)).fetchone()[0] == 1
+
+
+def test_reconcile_rechecks_the_delegation_before_removing_a_pending_zone(app, monkeypatch):
+    """Constat 10 : une suppression dont le retrait PowerDNS a échoué était rejouée sans nouveau relevé, même
+    si la délégation était revenue vers l'instance entre-temps."""
+    import runpy
+    from pathlib import Path
+
+    from synunnel.db import get_db, init_db
+
+    def pending(name):
+        with app.app_context():
+            return get_db().execute("SELECT 1 FROM zone_removals WHERE name=?", (name,)).fetchone() is not None
+
+    with app.app_context():
+        init_db()
+        db = get_db()
+        with db:
+            for name in ("revenue.example", "douteuse.example", "partie.example"):
+                db.execute("INSERT INTO zone_removals(name,at) VALUES(?,'2026-09-29T00:00:00')", (name,))
+    states = {"revenue.example": (True, list(OURS)), "douteuse.example": (None, []),
+              "partie.example": (False, ["ns1.hebergeur.net."])}
+    monkeypatch.setattr("synunnel.create_app", lambda: app)
+    reconcile = runpy.run_path(str(Path(__file__).resolve().parent.parent / "scripts/reconcile.py"))
+    monkeypatch.setitem(reconcile["main"].__globals__, "create_app", lambda: app)
+    monkeypatch.setitem(reconcile["main"].__globals__, "project_runtime", lambda _app: True)
+    monkeypatch.setitem(reconcile["main"].__globals__, "delegation_status", lambda domain, ns: states[domain])
+    reconcile["main"]()
+    assert pending("revenue.example") and pending("douteuse.example") and not pending("partie.example")
