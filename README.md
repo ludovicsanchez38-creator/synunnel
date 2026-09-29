@@ -96,7 +96,10 @@ Un agent IA ou un script peut tout faire sur un compte (domaines, DNS, machines,
 - `scripts/provision-site.py` et `scripts/create-machine-config.py` : rattachement d'un site ou d'une machine à un compte approuvé depuis le VPS, sans passer par le tableau de bord.
 - État des services : `sudo systemctl status pdns caddy wg-quick@wg0 synunnel synunnel-reconcile.timer`.
 - La base fait foi : si PowerDNS, WireGuard ou Caddy n'ont pas pu être mis à jour pendant une action, le rapprochement automatique (toutes les cinq minutes, `journalctl -u synunnel-reconcile`) termine le travail.
-- À sauvegarder régulièrement : `/var/lib/synunnel/`, `/var/lib/powerdns/`, `/etc/synunnel/`, `/etc/wireguard/` et `/var/lib/caddy/`.
+- Sauvegardes : **deux archives chiffrées, à des clés différentes, rangées hors du VPS**, jamais une seule qui mélange la base et les secrets (avec `SECRET_KEY` et la base, on peut forger une session sur n'importe quel compte ; `TOTP_KEY` ne protège les secrets de double authentification que d'une fuite de la base seule).
+  - **Base** : copie cohérente des deux bases SQLite, prise avec l'API de sauvegarde de SQLite (`sqlite3 … ".backup fichier"` ou `python3 -c "import sqlite3; sqlite3.connect(SRC).backup(sqlite3.connect(DST))"`), jamais par `cp` ou `tar` d'une base ouverte en WAL : `/var/lib/synunnel/synunnel.db` et `/var/lib/powerdns/synunnel.sqlite3`. Vérifier chaque copie par `PRAGMA integrity_check`.
+  - **Secrets** : `/etc/synunnel/` (fichier d'environnement, mot de passe SMTP, textes de l'exploitant), `/etc/wireguard/`, `/etc/powerdns/pdns.d/synunnel.conf` (clé de l'API PowerDNS) et `/var/lib/caddy/` (certificats et compte ACME).
+  - Aucune archive en clair ne reste sur le VPS ; restauration à rejouer régulièrement sur une machine de test.
 
 ## Développement
 
