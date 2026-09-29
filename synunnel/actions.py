@@ -43,6 +43,9 @@ from .keys import generate_keypair
 
 EMAIL_RE = re.compile(r"^[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+$")
 MACHINE_NAME_MAX = 80
+# Une zone supprimée par son titulaire reste servie ce temps-là : les résolveurs qui ont encore l'ancienne
+# délégation en cache (48 h pour les NS de .com) continuent de recevoir des réponses.
+ZONE_RETIREMENT = 48 * 3600
 Guard = Callable[[sqlite3.Connection], None] | None
 
 
@@ -601,13 +604,16 @@ def delete_domain(app: Flask, user_id: int | None, domain_id: int, guard: Guard 
             db.execute("DELETE FROM access_codes WHERE hostname=?", (hostname,))
         db.execute("DELETE FROM domain_claims WHERE domain_id=?", (domain_id,))
         db.execute("DELETE FROM domains WHERE id=?", (domain_id,))
-        db.execute("INSERT OR REPLACE INTO zone_removals(name, at) VALUES(?,?)", (domain["name"], now_iso()))
+        # Retrait de la zone différé pour le titulaire (caches des résolveurs), immédiat pour l'administrateur.
+        not_before = 0 if force else int(time.time()) + ZONE_RETIREMENT
+        db.execute("INSERT OR REPLACE INTO zone_removals(name, at, not_before) VALUES(?,?,?)",
+                   (domain["name"], now_iso(), not_before))
         if audit:
             audit(db, "domain.delete", f"domain:{domain_id} {domain['name']}")
-    synced = remove_zone(app, domain["name"])
+    synced = remove_zone(app, domain["name"]) if force else True
     if hostnames:
         synced = project_runtime(app) and synced
-    return {"synced": synced, "name": domain["name"]}
+    return {"synced": synced, "name": domain["name"], "zone_removed_after": not_before or None}
 
 
 # ---------------------------------------------------------------- machines
