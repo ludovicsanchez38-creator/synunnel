@@ -3,7 +3,8 @@
 import ipaddress
 import os
 import re
-from collections import defaultdict
+import time
+from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import dns.exception
@@ -41,7 +42,11 @@ def system_reservations(hosts: list[str], extra: list[str] | None = None) -> tup
     """
     reserved: set[str] = set()
     for host in [*hosts, *(extra or [])]:
-        labels = host.strip().rstrip(".").lower().split(".")
+        try:
+            host = host.strip().rstrip(".").lower().encode("idna").decode("ascii")
+        except UnicodeError:
+            continue
+        labels = host.split(".")
         if len(labels) < 2 or not all(labels):
             continue
         reserved.add(".".join(labels))
@@ -79,7 +84,7 @@ def relative_name(value: str, *, host_only: bool = False) -> str:
         return value
     labels = value.split(".")
     pattern = LABEL_RE if host_only else RECORD_LABEL_RE
-    if not value or len(value) > 240 or any(not pattern.fullmatch(x) for x in labels):
+    if not value or len(value) > 240 or any(len(x) > 63 or not pattern.fullmatch(x) for x in labels):
         raise ValueError("Nom d'enregistrement invalide.")
     return value
 
@@ -99,6 +104,8 @@ def canonical_content(kind: str, content: str) -> str:
     if not content or len(content) > 4096:
         raise ValueError("Contenu DNS invalide.")
     if kind in {"A", "AAAA"}:
+        if "%" in content:
+            raise ValueError("Adresse IP avec portée refusée.")
         ip = ipaddress.ip_address(content)
         if (kind == "A" and ip.version != 4) or (kind == "AAAA" and ip.version != 6):
             raise ValueError("L'adresse IP ne correspond pas au type DNS.")
@@ -167,21 +174,25 @@ def public_address(value: str) -> bool:
     """Seules les adresses routables sur Internet sont interrogées : un domaine hostile ne peut pas
     faire sonder le réseau interne de l'instance en annonçant des serveurs de noms privés."""
     try:
-        return ipaddress.ip_address(value).is_global
+        ip = ipaddress.ip_address(value)
     except ValueError:
         return False
+    excluded = ("192.88.99.0/24", "64:ff9b::/96", "fec0::/10")
+    return ip.is_global and not ip.is_multicast and not any(
+        ip.version == ipaddress.ip_network(net).version and ip in ipaddress.ip_network(net) for net in excluded
+    )
 
 
 def delegation_status(domain: str, nameservers: tuple[str, str] | None = None) -> tuple[bool | None, list[str]]:
     """Interroge directement les serveurs de la zone parente."""
     parent = dns.name.from_text(domain).parent().to_text()
     try:
-        parent_ns = dns.resolver.resolve(parent, "NS", lifetime=4)
+        parent_ns = dns.resolver.resolve(parent, "NS", lifetime=2)
         hosts = [item.target.to_text() for item in parent_ns]
-        ip = next(str(item) for item in dns.resolver.resolve(hosts[0], "A", lifetime=4) if public_address(str(item)))
+        ip = next(str(item) for item in dns.resolver.resolve(hosts[0], "A", lifetime=2) if public_address(str(item)))
         query = dns.message.make_query(f"{domain}.", "NS")
         query.flags &= ~dns.flags.RD
-        response = dns.query.udp(query, ip, timeout=4)
+        response = dns.query.udp(query, ip, timeout=2)
         seen = {
             item.target.to_text().lower()
             for section in (response.answer, response.authority)
@@ -204,9 +215,10 @@ def ownership_proof(domain: str) -> set[str]:
     enregistrement ajouté il y a une minute est vu sans attendre l'expiration d'un cache.
     """
     target = dns.name.from_text(f"{VERIFY_LABEL}.{domain}.")
+    deadline = time.monotonic() + 12
     resolver = dns.resolver.Resolver(configure=True)
     resolver.timeout = 2
-    resolver.lifetime = 5
+    resolver.lifetime = 3
     try:
         zone = dns.resolver.zone_for_name(dns.name.from_text(f"{domain}."), resolver=resolver, lifetime=5)
         servers = [item.target.to_text() for item in resolver.resolve(zone, "NS")]
@@ -215,32 +227,39 @@ def ownership_proof(domain: str) -> set[str]:
     addresses: list[str] = []
     for server in servers[:4]:
         for kind in ("A", "AAAA"):
+            if time.monotonic() > deadline:
+                break
             try:
                 addresses.extend(item.to_text() for item in resolver.resolve(server, kind)
                                  if public_address(item.to_text()))
             except dns.exception.DNSException:
                 continue
-    values: set[str] = set()
-    answered = False
+    counts: Counter = Counter()
+    answered = 0
     for address in addresses[:8]:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
         try:
-            response, _tcp = dns.query.udp_with_fallback(dns.message.make_query(target, "TXT"), address, timeout=3)
+            response, _tcp = dns.query.udp_with_fallback(dns.message.make_query(target, "TXT"), address,
+                                                         timeout=min(3, remaining))
         except (dns.exception.DNSException, OSError):
             continue
-        # Seule une réponse faisant autorité compte ; les serveurs secondaires en retard
-        # n'empêchent pas la preuve si un autre serveur de la zone la porte déjà.
+        # Seule une réponse faisant autorité compte.
         if not response.flags & dns.flags.AA or response.rcode() not in (dns.rcode.NOERROR, dns.rcode.NXDOMAIN):
             continue
-        answered = True
-        values.update(
+        answered += 1
+        counts.update({
             b"".join(item.strings).decode("utf-8", "replace")
             for rrset in response.answer
             if rrset.rdtype == dns.rdatatype.TXT and rrset.name == target
             for item in rrset
-        )
+        })
     if not answered:
         raise ValueError("Aucun serveur DNS du domaine n'a répondu ; réessaie dans quelques minutes.")
-    return values
+    # La preuve doit être servie par la majorité des serveurs qui ont répondu : un serveur isolé,
+    # repris le temps d'une minute, ne suffit pas.
+    return {value for value, seen in counts.items() if seen * 2 > answered}
 
 
 class PowerDNS:
@@ -251,7 +270,7 @@ class PowerDNS:
         self.session.headers.update({"X-API-Key": api_key, "Content-Type": "application/json"})
 
     def _request(self, method: str, path: str, **kwargs) -> requests.Response:
-        response = self.session.request(method, f"{self.base_url}{path}", timeout=8, **kwargs)
+        response = self.session.request(method, f"{self.base_url}{path}", timeout=5, **kwargs)
         response.raise_for_status()
         return response
 
@@ -262,7 +281,7 @@ class PowerDNS:
         })
 
     def ensure_zone(self, domain: str) -> None:
-        response = self.session.get(f"{self.base_url}/zones/{domain}.", timeout=8)
+        response = self.session.get(f"{self.base_url}/zones/{domain}.", timeout=5)
         if response.status_code == 404:
             self.create_zone(domain)
         else:
@@ -272,7 +291,9 @@ class PowerDNS:
         return {item["name"].rstrip(".") for item in self._request("GET", "/zones").json()}
 
     def delete_zone(self, domain: str) -> None:
-        self._request("DELETE", f"/zones/{domain}.")
+        response = self.session.delete(f"{self.base_url}/zones/{domain}.", timeout=5)
+        if response.status_code not in (204, 404):
+            response.raise_for_status()
 
     def migrate_authority(self, domain: str, soa_rname: str) -> bool:
         """Remplace les NS et le SOA d'une zone existante, sans toucher aux autres RRsets."""
@@ -302,6 +323,10 @@ class PowerDNS:
     def sync_zone(self, db, domain_id: int, domain: str, public_ipv4: str, public_ipv6: str) -> None:
         current = self._request("GET", f"/zones/{domain}.").json()["rrsets"]
         wanted: dict[tuple[str, str], list[str]] = defaultdict(list)
+        # Enregistrements et adresses lus dans un même instantané de la base.
+        opened = not db.in_transaction
+        if opened:
+            db.execute("BEGIN")
         ttls: dict[tuple[str, str], int] = {}
         for row in db.execute("SELECT name, type, content, ttl FROM records WHERE domain_id=?", (domain_id,)):
             key = (fqdn(row["name"], domain), row["type"])
@@ -309,10 +334,17 @@ class PowerDNS:
             ttls[key] = min(ttls.get(key, row["ttl"]), row["ttl"])
         for row in db.execute("SELECT hostname FROM addresses WHERE domain_id=?", (domain_id,)):
             for kind, ip in (("A", public_ipv4), ("AAAA", public_ipv6)):
+                key = (f"{row['hostname']}.", kind)
                 if ip:
-                    key = (f"{row['hostname']}.", kind)
                     wanted[key] = [ip]
                     ttls[key] = 300
+                else:
+                    # Sans IPv6 sur l'instance, un AAAA recopié mènerait encore à l'ancien serveur et
+                    # contournerait la protection de l'adresse : il n'est pas publié.
+                    wanted.pop(key, None)
+                    ttls.pop(key, None)
+        if opened:
+            db.commit()
         for kind, ip in (("A", public_ipv4), ("AAAA", public_ipv6)):
             if ip:
                 key = (f"*.{domain}.", kind)
@@ -327,5 +359,13 @@ class PowerDNS:
                 "name": name, "type": kind, "ttl": ttls[(name, kind)], "changetype": "REPLACE",
                 "records": [{"content": value, "disabled": False} for value in sorted(set(values))],
             })
-        if changes:
-            self._request("PATCH", f"/zones/{domain}.", json={"rrsets": changes})
+        failed = []
+        # Suppressions d'abord, puis chaque RRset seul : un enregistrement refusé par PowerDNS
+        # n'empêche plus les autres d'être appliqués.
+        for change in sorted(changes, key=lambda item: item["changetype"] != "DELETE"):
+            try:
+                self._request("PATCH", f"/zones/{domain}.", json={"rrsets": [change]})
+            except requests.HTTPError:
+                failed.append(f"{change['name']} {change['type']}")
+        if failed:
+            raise requests.HTTPError(f"Refusés par PowerDNS : {', '.join(failed)}")

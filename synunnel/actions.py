@@ -11,6 +11,7 @@ base et le rapprochement périodique (scripts/reconcile.py) le termine.
 """
 
 import base64
+import fcntl
 import ipaddress
 import random
 import re
@@ -25,7 +26,7 @@ from collections.abc import Callable
 import requests
 from flask import Flask
 
-from .db import get_db, now_iso
+from .db import allocate_id, get_db, now_iso
 from .dns import (
     VERIFY_LABEL,
     PowerDNS,
@@ -53,6 +54,14 @@ class ActionError(Exception):
         self.code = code
         self.message = message
         self.headers = headers or {}
+
+
+class _Replay(Exception):
+    """Demande déjà satisfaite : on sort de la transaction sans rien écrire, puis on reprojette."""
+
+    def __init__(self, result: dict):
+        super().__init__()
+        self.result = result
 
 
 def _invalid(message: str) -> ActionError:
@@ -122,16 +131,30 @@ def sync_runtime(app: Flask) -> None:
         subprocess.run(shlex.split(command), check=True, capture_output=True, timeout=20)
 
 
+def zone_lock(app: Flask, name: str):
+    """Verrou de fichier par zone : deux projections ne s'entrelacent jamais, la plus récente lit la base
+    après la plus ancienne et gagne toujours."""
+    from pathlib import Path
+    folder = Path(app.config["DATABASE"]).parent / "locks"
+    folder.mkdir(mode=0o700, exist_ok=True)
+    handle = open(folder / f"zone-{name}.lock", "w")  # noqa: SIM115 - libéré par l'appelant
+    fcntl.flock(handle, fcntl.LOCK_EX)
+    return handle
+
+
 def project_zone(app: Flask, domain) -> bool:
-    """Applique la zone voulue à PowerDNS, hors de tout verrou. False : le rapprochement finira."""
+    """Applique la zone voulue à PowerDNS, sans verrou SQLite. False : le rapprochement finira."""
     if not app.config["PDNS_ENABLED"]:
         return True
+    lock = zone_lock(app, domain["name"])
     try:
         pdns = _pdns(app)
         pdns.ensure_zone(domain["name"])
         pdns.sync_zone(get_db(), domain["id"], domain["name"], app.config["PUBLIC_IPV4"], app.config["PUBLIC_IPV6"])
     except requests.RequestException:
         return False
+    finally:
+        lock.close()
     return True
 
 
@@ -247,9 +270,21 @@ def domain_view(app: Flask, user_id: int, domain_id: int) -> dict:
         "SELECT * FROM records WHERE domain_id=? ORDER BY name,type,content", (domain_id,),
     ).fetchall()
     nameservers = (f"{app.config['NS1_HOST']}.", f"{app.config['NS2_HOST']}.")
-    active, parent_ns = delegation_status(domain["name"], nameservers)
+    # État de délégation relevé par le rapprochement automatique : afficher une page ne déclenche
+    # jamais de requête DNS sortante.
+    active = None if domain["delegation_active"] is None else bool(domain["delegation_active"])
+    parent_ns = (domain["delegation_ns"] or "").split(",") if domain["delegation_ns"] else []
     return {"domain": domain, "records": records, "active": active, "parent_ns": parent_ns,
-            "nameservers": nameservers}
+            "nameservers": nameservers, "checked_at": domain["delegation_checked_at"]}
+
+
+def refresh_delegation(app: Flask, domain) -> None:
+    nameservers = (f"{app.config['NS1_HOST']}.", f"{app.config['NS2_HOST']}.")
+    active, parent_ns = delegation_status(domain["name"], nameservers)
+    with get_db() as db:
+        db.execute("UPDATE domains SET delegation_active=?, delegation_ns=?, delegation_checked_at=? WHERE id=?",
+                   (None if active is None else int(active), ",".join(parent_ns)[:1000], int(time.time()),
+                    domain["id"]))
 
 
 # ---------------------------------------------------------------- domaines
@@ -282,9 +317,9 @@ def create_claim(app: Flask, user_id: int, domain_raw: str, selectors: list[str]
         if owned + pending >= app.config["MAX_DOMAINS_PER_USER"]:
             raise ActionError(409, "quota", "Nombre maximal de domaines atteint pour ce compte.")
         db.execute(
-            "INSERT INTO domain_claims(user_id,name,token,selectors,created_at) VALUES(?,?,?,?,?) "
+            "INSERT INTO domain_claims(id,user_id,name,token,selectors,created_at) VALUES(?,?,?,?,?,?) "
             "ON CONFLICT(user_id,name) DO UPDATE SET selectors=excluded.selectors",
-            (user_id, domain, secrets.token_urlsafe(24), ",".join(clean), now_iso()),
+            (allocate_id(db, "domain_claims"), user_id, domain, secrets.token_urlsafe(24), ",".join(clean), now_iso()),
         )
         if audit:
             audit(db, "claim.create", f"claim {domain}")
@@ -313,7 +348,8 @@ def verify_claim(app: Flask, user_id: int, claim_id: int, guard: Guard = None, a
         done = get_db().execute("SELECT id FROM domains WHERE id=? AND user_id=?",
                                 (claim["domain_id"], user_id)).fetchone()
         if done is not None:
-            return {"domain_id": done["id"], "copied": 0, "synced": True, "created": False}
+            synced = project_zone(app, {"id": done["id"], "name": claim["name"]})
+            return {"domain_id": done["id"], "copied": 0, "synced": synced, "created": False}
     rate_limit("verify", str(user_id), 20, 3600)
     domain = claim["name"]
     db = get_db()
@@ -337,6 +373,16 @@ def verify_claim(app: Flask, user_id: int, claim_id: int, guard: Guard = None, a
         raise _invalid(str(exc)) from exc
     if not snapshot:
         raise _invalid("Aucun enregistrement public trouvé ; la copie DNS serait vide.")
+    if len(snapshot) > app.config["MAX_RECORDS_PER_DOMAIN"]:
+        raise _invalid(f"La zone publique compte {len(snapshot)} enregistrements, au-delà du quota de "
+                       f"{app.config['MAX_RECORDS_PER_DOMAIN']} : demande à l'administrateur.")
+    checked = []
+    for rel, kind, content, ttl in snapshot:
+        try:
+            checked.append((relative_name(rel) if rel != "@" else "@", kind, canonical_content(kind, content), ttl))
+        except ValueError as exc:
+            raise _invalid(f"Enregistrement public refusé ({rel} {kind}) : {exc}") from exc
+    snapshot = checked
     try:
         with db:
             _begin(db, guard)
@@ -350,12 +396,12 @@ def verify_claim(app: Flask, user_id: int, claim_id: int, guard: Guard = None, a
                 raise ActionError(409, "quota", "Nombre maximal de domaines atteint pour ce compte.")
             refuse_overlap(db, domain, user_id)
             domain_id = db.execute(
-                "INSERT INTO domains(user_id,name,created_at) VALUES(?,?,?)", (user_id, domain, now_iso()),
+                "INSERT INTO domains(id,user_id,name,created_at) VALUES(?,?,?,?)",
+                (allocate_id(db, "domains"), user_id, domain, now_iso()),
             ).lastrowid
-            db.executemany(
-                "INSERT INTO records(domain_id,name,type,content,ttl) VALUES(?,?,?,?,?)",
-                [(domain_id, *record) for record in snapshot],
-            )
+            for record in snapshot:
+                db.execute("INSERT INTO records(id,domain_id,name,type,content,ttl) VALUES(?,?,?,?,?,?)",
+                           (allocate_id(db, "records"), domain_id, *record))
             # La preuve est faite : les demandes concurrentes sur ce nom tombent, celle-ci garde
             # le lien vers le domaine pour qu'une vérification rejouée retrouve son résultat.
             db.execute("DELETE FROM domain_claims WHERE name=? AND id<>?", (domain, claim_id))
@@ -381,24 +427,25 @@ def add_record(app: Flask, user_id: int, domain_id: int, name_raw: str, kind_raw
         raise _invalid(str(exc) or "Enregistrement invalide.") from exc
     if not 300 <= ttl <= 86400:
         raise _invalid("TTL entre 300 et 86 400 secondes.")
+    if kind == "CNAME" and name == "@":
+        # SOA et NS vivent toujours à la racine : PowerDNS refuserait la zone entière.
+        raise _invalid("Un CNAME ne peut pas être posé à la racine du domaine.")
     db = get_db()
+    created = True
     try:
         with db:
             _begin(db, guard)
             owned_domain(user_id, domain_id)
             same = db.execute("SELECT id, ttl FROM records WHERE domain_id=? AND name=? AND type=? AND content=?",
                               (domain_id, name, kind, content)).fetchone()
-            if same is not None and same["ttl"] == ttl:
-                return {"id": same["id"], "synced": True, "created": False}
             if same is not None:
-                db.execute("UPDATE records SET ttl=? WHERE id=?", (ttl, same["id"]))
-                if audit:
-                    audit(db, "record.update", f"record:{same['id']} {name} {kind} ttl={ttl}")
-                record_id = same["id"]
-                updated = True
+                # Même enregistrement rejoué : rien à créer ; seul un TTL différent est mis à jour.
+                record_id, created = same["id"], False
+                if same["ttl"] != ttl:
+                    db.execute("UPDATE records SET ttl=? WHERE id=?", (ttl, record_id))
+                    if audit:
+                        audit(db, "record.update", f"record:{record_id} {name} {kind} ttl={ttl}")
             else:
-                updated = False
-            if not updated:
                 count = db.execute("SELECT COUNT(*) FROM records WHERE domain_id=?", (domain_id,)).fetchone()[0]
                 if count >= app.config["MAX_RECORDS_PER_DOMAIN"]:
                     raise ActionError(409, "quota", "Nombre maximal d'enregistrements atteint pour ce domaine.")
@@ -414,14 +461,14 @@ def add_record(app: Flask, user_id: int, domain_id: int, name_raw: str, kind_raw
                     raise ActionError(409, "conflict",
                                       "Cette adresse est gérée par Synunnel ; supprime-la avant de modifier son DNS.")
                 record_id = db.execute(
-                    "INSERT INTO records(domain_id,name,type,content,ttl) VALUES(?,?,?,?,?)",
-                    (domain_id, name, kind, content, ttl),
+                    "INSERT INTO records(id,domain_id,name,type,content,ttl) VALUES(?,?,?,?,?,?)",
+                    (allocate_id(db, "records"), domain_id, name, kind, content, ttl),
                 ).lastrowid
                 if audit:
                     audit(db, "record.create", f"record:{record_id} {name} {kind} {content[:120]}")
     except sqlite3.IntegrityError as exc:
         raise ActionError(409, "conflict", "Cet enregistrement existe déjà.") from exc
-    return {"id": record_id, "synced": project_zone(app, domain), "created": not updated}
+    return {"id": record_id, "synced": project_zone(app, domain), "created": created}
 
 
 def delete_record(app: Flask, user_id: int, domain_id: int, record_id: int, guard: Guard = None,
@@ -440,6 +487,51 @@ def delete_record(app: Flask, user_id: int, domain_id: int, record_id: int, guar
         if audit:
             audit(db, "record.delete", f"record:{record_id} {gone['name']} {gone['type']} {gone['content'][:120]}")
     return {"synced": project_zone(app, domain)}
+
+
+def remove_zone(app: Flask, name: str) -> bool:
+    """Retire une zone de PowerDNS ; en cas d'échec, la pierre tombale reste et le rapprochement réessaie."""
+    if app.config["PDNS_ENABLED"]:
+        lock = zone_lock(app, name)
+        try:
+            _pdns(app).delete_zone(name)
+        except requests.RequestException:
+            return False
+        finally:
+            lock.close()
+    with get_db() as db:
+        db.execute("DELETE FROM zone_removals WHERE name=? AND name NOT IN (SELECT name FROM domains)", (name,))
+    return True
+
+
+def delete_domain(app: Flask, user_id: int | None, domain_id: int, guard: Guard = None,
+                  audit: Callable | None = None, force: bool = False) -> dict:
+    """Supprime un domaine et sa zone. Le propriétaire doit d'abord retirer ses adresses ; l'administrateur
+    (user_id None, force) les retire avec lui, par exemple pour rendre un domaine à son vrai titulaire."""
+    db = get_db()
+    with db:
+        _begin(db, guard)
+        if user_id is None:
+            domain = db.execute("SELECT * FROM domains WHERE id=?", (domain_id,)).fetchone()
+            if domain is None:
+                raise ActionError(404, "not_found", "Domaine introuvable.")
+        else:
+            domain = owned_domain(user_id, domain_id)
+        if not force and db.execute("SELECT 1 FROM addresses WHERE domain_id=?", (domain_id,)).fetchone():
+            raise ActionError(409, "in_use", "Supprime d'abord les adresses de ce domaine.")
+        hostnames = [row[0] for row in db.execute("SELECT hostname FROM addresses WHERE domain_id=?", (domain_id,))]
+        for hostname in hostnames:
+            db.execute("DELETE FROM host_sessions WHERE hostname=?", (hostname,))
+            db.execute("DELETE FROM access_codes WHERE hostname=?", (hostname,))
+        db.execute("DELETE FROM domain_claims WHERE domain_id=?", (domain_id,))
+        db.execute("DELETE FROM domains WHERE id=?", (domain_id,))
+        db.execute("INSERT OR REPLACE INTO zone_removals(name, at) VALUES(?,?)", (domain["name"], now_iso()))
+        if audit:
+            audit(db, "domain.delete", f"domain:{domain_id} {domain['name']}")
+    synced = remove_zone(app, domain["name"])
+    if hostnames:
+        synced = project_runtime(app) and synced
+    return {"synced": synced, "name": domain["name"]}
 
 
 # ---------------------------------------------------------------- machines
@@ -468,7 +560,7 @@ def _insert_machine(app: Flask, user_id: int, name_raw, public_key: str, guard: 
                               (user_id, public_key)).fetchone()
             if same is not None and same["name"] == name:
                 # Même demande rejouée (réponse perdue) : on renvoie la machine déjà créée.
-                return {"id": same["id"], "name": same["name"], "ip": same["ip"], "created": False, "synced": True}
+                raise _Replay({"id": same["id"], "name": same["name"], "ip": same["ip"], "created": False})
             owned = db.execute("SELECT COUNT(*) FROM machines WHERE user_id=?", (user_id,)).fetchone()[0]
             if owned >= app.config["MAX_MACHINES_PER_USER"]:
                 raise ActionError(409, "quota", "Nombre maximal de machines atteint pour ce compte.")
@@ -477,11 +569,13 @@ def _insert_machine(app: Flask, user_id: int, name_raw, public_key: str, guard: 
             if ip is None:
                 raise ActionError(409, "exhausted", "Plage d'adresses WireGuard épuisée.")
             machine_id = db.execute(
-                "INSERT INTO machines(user_id,name,ip,public_key,created_at) VALUES(?,?,?,?,?)",
-                (user_id, name, ip, public_key, now_iso()),
+                "INSERT INTO machines(id,user_id,name,ip,public_key,created_at) VALUES(?,?,?,?,?,?)",
+                (allocate_id(db, "machines"), user_id, name, ip, public_key, now_iso()),
             ).lastrowid
             if audit:
                 audit(db, "machine.create", f"machine:{machine_id} {name} {ip}")
+    except _Replay as replay:
+        return {**replay.result, "synced": project_runtime(app)}
     except sqlite3.IntegrityError as exc:
         raise ActionError(409, "conflict", "Nom de machine ou clé publique déjà utilisés.") from exc
     return {"id": machine_id, "name": name, "ip": ip, "created": True, "synced": project_runtime(app)}
@@ -565,7 +659,7 @@ def create_address(app: Flask, user_id: int, domain_id, machine_id, name_raw, po
             ).fetchone()
             if same is not None:
                 # Même demande rejouée : l'adresse existe déjà telle quelle.
-                return {"id": same["id"], "hostname": hostname, "created": False, "synced": True}
+                raise _Replay({"id": same["id"], "hostname": hostname, "created": False})
             count = db.execute(
                 "SELECT COUNT(*) FROM addresses a JOIN domains d ON d.id=a.domain_id WHERE d.user_id=?", (user_id,),
             ).fetchone()[0]
@@ -577,13 +671,16 @@ def create_address(app: Flask, user_id: int, domain_id, machine_id, name_raw, po
             ).fetchone():
                 raise ActionError(409, "conflict", "Un enregistrement DNS incompatible existe déjà pour ce nom.")
             address_id = db.execute(
-                "INSERT INTO addresses(domain_id,machine_id,hostname,port,protected,created_at,route_token) "
-                "VALUES(?,?,?,?,?,?,?)",
-                (domain_id, machine_id, hostname, port, int(bool(protected)), now_iso(), secrets.token_hex(12)),
+                "INSERT INTO addresses(id,domain_id,machine_id,hostname,port,protected,created_at,route_token) "
+                "VALUES(?,?,?,?,?,?,?,?)",
+                (allocate_id(db, "addresses"), domain_id, machine_id, hostname, port, int(bool(protected)), now_iso(),
+                 secrets.token_hex(12)),
             ).lastrowid
             if audit:
                 audit(db, "address.create", f"address:{address_id} {hostname} port={port} "
                                         f"{'protégée' if protected else 'publique'}")
+    except _Replay as replay:
+        return {**replay.result, "synced": project_zone(app, domain) & project_runtime(app)}
     except sqlite3.IntegrityError as exc:
         raise ActionError(409, "conflict", "Cette adresse existe déjà.") from exc
     synced = project_zone(app, domain) & project_runtime(app)

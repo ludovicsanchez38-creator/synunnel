@@ -13,7 +13,7 @@ Navigateur ──HTTPS──> Caddy (VPS) ──WireGuard──> votre machine :
 Registrar ──NS──────> PowerDNS (VPS) : votre zone, recopiée puis gérée ici
 ```
 
-1. Vous créez un compte sur le tableau de bord de l'instance ; l'administrateur le valide.
+1. L'administrateur vous remet un code d'invitation ; il ouvre votre compte sur le tableau de bord de l'instance.
 2. Vous ajoutez votre domaine et prouvez qu'il vous appartient avec un enregistrement TXT. Synunnel recopie alors vos enregistrements publics (mail compris) dans sa propre zone.
 3. Après vérification de cette copie, vous déléguez le domaine aux deux serveurs de noms de l'instance chez votre registrar.
 4. Vous connectez une machine : Synunnel génère une configuration WireGuard, affichée une seule fois.
@@ -50,7 +50,7 @@ Le dépôt peut vivre ailleurs (le service est généré pour son emplacement r�
 
 UFW reçoit les règles des ports publics mais **n'est pas activé** par le script, pour ne pas couper votre accès SSH. Pour l'activer : `sudo ufw allow 22/tcp && sudo ufw enable` (adaptez le port SSH). Le tunnel, lui, est filtré dans tous les cas par sa propre table nftables.
 
-Ensuite, créez votre compte sur `https://tunnel.example.org/register` et approuvez-le avec l'[API d'administration](docs/API-ADMIN.md) ; le jeton se trouve dans `/etc/synunnel/synunnel.env`.
+Les comptes s'ouvrent par invitation (`REGISTRATION_MODE=invitation`, par défaut) : créez une invitation avec l'[API d'administration](docs/API-ADMIN.md) (jeton dans `/etc/synunnel/synunnel.env`), puis inscrivez-vous sur `https://tunnel.example.org/register` avec le code. Le mode `approval` (inscription libre puis approbation) reste possible ; ses limites sont décrites dans l'API d'administration.
 
 ## Utilisation
 

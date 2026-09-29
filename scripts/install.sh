@@ -51,6 +51,11 @@ MAX_DOMAINS_PER_USER="${MAX_DOMAINS_PER_USER:-20}"
 MAX_MACHINES_PER_USER="${MAX_MACHINES_PER_USER:-10}"
 MAX_ADDRESSES_PER_USER="${MAX_ADDRESSES_PER_USER:-50}"
 MAX_RECORDS_PER_DOMAIN="${MAX_RECORDS_PER_DOMAIN:-200}"
+REGISTRATION_MODE="${REGISTRATION_MODE:-invitation}"
+if [[ "$REGISTRATION_MODE" != invitation && "$REGISTRATION_MODE" != approval ]]; then
+  printf 'REGISTRATION_MODE vaut invitation ou approval.\n' >&2
+  exit 1
+fi
 HOSTNAME_RE='^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$'
 for list in REDIRECT_HOSTS RESERVED_DOMAINS; do
   IFS=, read -ra names <<< "${!list}"
@@ -73,6 +78,10 @@ if [[ ! "$SOA_RNAME" =~ ^[a-z0-9.-]+\.$ || "$SOA_RNAME" == *..* ]]; then
 fi
 if [[ ! "$REPO_DIR" =~ ^[A-Za-z0-9._/-]+$ ]]; then
   printf 'Le chemin du dépôt ne doit contenir ni espace ni caractère spécial : %s\n' "$REPO_DIR" >&2
+  exit 1
+fi
+if [[ ! "$PUBLIC_IPV4" =~ ^[0-9.]+$ || ! "$PUBLIC_IPV6" =~ ^[0-9a-fA-F:]*$ ]]; then
+  printf 'Adresses publiques invalides (IPv4 en chiffres et points, IPv6 sans portée ni autre caractère).\n' >&2
   exit 1
 fi
 python3 -c 'import ipaddress,sys; ipaddress.IPv4Address(sys.argv[1]); sys.argv[2] and ipaddress.IPv6Address(sys.argv[2])' "$PUBLIC_IPV4" "$PUBLIC_IPV6"
@@ -154,11 +163,13 @@ MAX_DOMAINS_PER_USER=$MAX_DOMAINS_PER_USER
 MAX_MACHINES_PER_USER=$MAX_MACHINES_PER_USER
 MAX_ADDRESSES_PER_USER=$MAX_ADDRESSES_PER_USER
 MAX_RECORDS_PER_DOMAIN=$MAX_RECORDS_PER_DOMAIN
+REGISTRATION_MODE=$REGISTRATION_MODE
 SYNC_COMMAND='/usr/bin/sudo -n /usr/local/sbin/synunnel-sync'
 EOF
 fi
 for setting in DASHBOARD_HOST NS1_HOST NS2_HOST SOA_RNAME REDIRECT_HOSTS ACME_EMAIL \
-  RESERVED_DOMAINS MAX_DOMAINS_PER_USER MAX_MACHINES_PER_USER MAX_ADDRESSES_PER_USER MAX_RECORDS_PER_DOMAIN; do
+  RESERVED_DOMAINS MAX_DOMAINS_PER_USER MAX_MACHINES_PER_USER MAX_ADDRESSES_PER_USER MAX_RECORDS_PER_DOMAIN \
+  REGISTRATION_MODE; do
   if ! grep -q "^${setting}=" /etc/synunnel/synunnel.env; then
     printf '%s=%s\n' "$setting" "${!setting}" >> /etc/synunnel/synunnel.env
   fi

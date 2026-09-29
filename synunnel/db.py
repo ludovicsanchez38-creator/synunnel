@@ -118,6 +118,21 @@ CREATE TABLE IF NOT EXISTS api_audit (
     ip TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_api_audit_at ON api_audit(at);
+CREATE TABLE IF NOT EXISTS invitations (
+    code_hash TEXT PRIMARY KEY,
+    email TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    expires_at INTEGER NOT NULL,
+    used_at TEXT
+);
+CREATE TABLE IF NOT EXISTS zone_removals (
+    name TEXT PRIMARY KEY,
+    at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS id_counters (
+    name TEXT PRIMARY KEY,
+    last INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS admin_audit (
     id INTEGER PRIMARY KEY,
     at TEXT NOT NULL,
@@ -128,6 +143,25 @@ CREATE TABLE IF NOT EXISTS admin_audit (
     target_user_id INTEGER
 );
 """
+
+
+ID_TABLES = {"users", "domain_claims", "domains", "records", "machines", "addresses"}
+
+
+def allocate_id(db: sqlite3.Connection, table: str) -> int:
+    """Identifiant jamais réutilisé, à appeler sous le verrou d'écriture de l'insertion.
+
+    SQLite réattribue le plus grand identifiant supprimé : une session, un jeton de route ou une
+    suppression rejouée viserait alors une autre ressource, parfois d'un autre compte.
+    """
+    if table not in ID_TABLES:
+        raise ValueError(table)
+    row = db.execute("SELECT last FROM id_counters WHERE name=?", (table,)).fetchone()
+    current = db.execute(f"SELECT COALESCE(MAX(id), 0) FROM {table}").fetchone()[0]
+    value = max(row[0] if row else 0, current) + 1
+    db.execute("INSERT INTO id_counters(name,last) VALUES(?,?) ON CONFLICT(name) DO UPDATE SET last=excluded.last",
+               (table, value))
+    return value
 
 
 def now_iso() -> str:
@@ -166,6 +200,10 @@ def init_db() -> None:
         # chargée dans Caddy ne peut pas être réautorisée par une adresse recréée au même nom.
         db.execute("ALTER TABLE addresses ADD COLUMN route_token TEXT")
         db.execute("UPDATE addresses SET route_token=lower(hex(randomblob(12))) WHERE route_token IS NULL")
+    domain_columns = {row[1] for row in db.execute("PRAGMA table_info(domains)")}
+    for column in ("delegation_active INTEGER", "delegation_ns TEXT", "delegation_checked_at INTEGER"):
+        if column.split()[0] not in domain_columns:
+            db.execute(f"ALTER TABLE domains ADD COLUMN {column}")
     if "domain_id" not in {row[1] for row in db.execute("PRAGMA table_info(domain_claims)")}:
         db.execute("ALTER TABLE domain_claims ADD COLUMN domain_id INTEGER")
     for table in ("users", "access_codes", "host_sessions"):

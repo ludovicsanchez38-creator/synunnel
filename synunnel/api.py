@@ -312,13 +312,25 @@ def get_domain(domain_id: int):
                     "nameservers": [current_app.config["NS1_HOST"], current_app.config["NS2_HOST"]]})
 
 
+@route("/domains/<int:domain_id>", methods=["DELETE"])
+@endpoint("domains")
+def delete_domain(domain_id: int):
+    result = _run(actions.delete_domain, current_app, g.api_token["user_id"], domain_id, _guard, _audit)
+    return jsonify({"deleted": True, "synced": result["synced"]})
+
+
 @route("/domains/<int:domain_id>/records", methods=["POST"])
 @endpoint("domains")
 def create_record(domain_id: int):
     data = _payload({"name": str, "type": str, "content": str, "ttl": int}, {"name", "type", "content"})
     result = _run(actions.add_record, current_app, g.api_token["user_id"], domain_id, data["name"], data["type"],
                   data["content"], data.get("ttl", 3600), _guard, _audit)
-    row = get_db().execute("SELECT id,name,type,content,ttl FROM records WHERE id=?", (result["id"],)).fetchone()
+    row = get_db().execute(
+        "SELECT r.id,r.name,r.type,r.content,r.ttl FROM records r JOIN domains d ON d.id=r.domain_id "
+        "WHERE r.id=? AND d.id=? AND d.user_id=?", (result["id"], domain_id, g.api_token["user_id"]),
+    ).fetchone()
+    if row is None:
+        raise ApiError(409, "conflict", "L'enregistrement a été modifié entre-temps ; relis le domaine.")
     return jsonify({"record": _record(row), "synced": result["synced"]}), 201 if result["created"] else 200
 
 

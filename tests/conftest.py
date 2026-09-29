@@ -11,6 +11,9 @@ INSTANCE = {
     "NS1_HOST": "ns1.synunnel.fr",
     "NS2_HOST": "ns2.synunnel.fr",
     "REDIRECT_HOSTS": "synunnel.com,www.synunnel.com",
+    # Les tests historiques passent par l'inscription libre puis l'approbation ; le mode
+    # invitation (par défaut en production) a ses propres tests.
+    "REGISTRATION_MODE": "approval",
 }
 
 

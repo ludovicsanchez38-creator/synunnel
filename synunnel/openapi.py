@@ -46,7 +46,7 @@ def document(app: Flask) -> dict:
                 "Un jeton se crée et se révoque depuis le tableau de bord (page Jetons d'API), jamais par l'API. "
                 "Tout jeton peut lire ; chaque écriture exige la permission indiquée en x-permission "
                 "(domains, machines, addresses, sharing). Une machine se déclare avec sa clé publique : générez "
-                "la paire sur la machine (wg genkey | tee cle.privee | wg pubkey). Ajout d'un domaine : POST "
+                "la paire sur la machine (umask 077 ; wg genkey | tee cle.privee | wg pubkey). Ajout d'un domaine : POST "
                 "/domains renvoie l'enregistrement TXT à poser chez l'hébergeur DNS actuel, puis POST "
                 "/claims/{id}/verify crée la zone et recopie les enregistrements publics ; vérifiez-la avant de "
                 "déléguer le domaine aux serveurs de noms indiqués par GET /me. N'envoyez le jeton qu'à "
@@ -98,8 +98,13 @@ def document(app: Flask) -> dict:
                                                      "enregistrements mail ont été recensés"}}},
                             extra_ok={"200": _json({"type": "object"}, "Même demande rejouée")}),
             },
-            "/domains/{domain_id}": {"get": {**_op("Domaine et ses enregistrements", None, {"200": _json(
-                {"type": "object"}, "Domaine")}, 404), "parameters": ids("domain_id")}},
+            "/domains/{domain_id}": {
+                "get": {**_op("Domaine et ses enregistrements", None, {"200": _json(
+                    {"type": "object"}, "Domaine")}, 404), "parameters": ids("domain_id")},
+                "delete": {**_op("Supprimer un domaine sans adresse (sa zone est retirée du DNS de l'instance)",
+                                 "domains", {"200": _json({"type": "object"}, "Supprimé")}, 404, 409),
+                           "parameters": ids("domain_id")},
+            },
             "/domains/{domain_id}/records": {"post": {**_op(
                 "Ajouter un enregistrement (A, AAAA, CNAME, MX, TXT, CAA)", "domains",
                 {"201": _json({"type": "object"}, "Enregistrement créé")}, 404, 409, 415, 422,

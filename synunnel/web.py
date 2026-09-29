@@ -4,7 +4,6 @@ import hashlib
 import hmac
 import os
 import secrets
-import sqlite3
 import time
 from functools import wraps
 from urllib.parse import quote, urlsplit
@@ -28,7 +27,7 @@ from flask.sessions import SecureCookieSessionInterface
 from werkzeug.middleware.proxy_fix import ProxyFix
 
 from . import VERSION_LABEL, actions, api
-from .db import close_db, get_db, init_db, now_iso
+from .db import allocate_id, close_db, get_db, init_db, now_iso
 from .dns import (
     system_reservations,
 )
@@ -160,6 +159,9 @@ def create_app(config_override: dict | None = None) -> Flask:
         MAX_DOMAINS_PER_USER=int(os.getenv("MAX_DOMAINS_PER_USER", "20")),
         MAX_MACHINES_PER_USER=int(os.getenv("MAX_MACHINES_PER_USER", "10")),
         MAX_ADDRESSES_PER_USER=int(os.getenv("MAX_ADDRESSES_PER_USER", "50")),
+        # « invitation » : l'administrateur remet un code à usage unique lié à une adresse, qui vaut
+        # approbation. « approval » : inscription libre puis approbation manuelle (voir SECURITE.md).
+        REGISTRATION_MODE=os.getenv("REGISTRATION_MODE", "invitation"),
         MAX_RECORDS_PER_DOMAIN=int(os.getenv("MAX_RECORDS_PER_DOMAIN", "200")),
         SYNC_COMMAND=os.getenv("SYNC_COMMAND", "/usr/bin/sudo -n /usr/local/sbin/synunnel-sync"),
         PDNS_ENABLED=True,
@@ -231,13 +233,14 @@ def create_app(config_override: dict | None = None) -> Flask:
         if request.path.startswith("/api/"):
             response.headers["Cache-Control"] = "no-store"
         if request.path.startswith("/admin/api/"):
-            target = request.view_args.get("user_id") if request.view_args else None
-            db = get_db()
-            db.execute(
-                "INSERT INTO admin_audit(at,ip,method,path,status,target_user_id) VALUES(?,?,?,?,?,?)",
-                (now_iso(), _client_ip(), request.method, request.path, response.status_code, target),
-            )
-            db.commit()
+            if g.get("admin_ok"):
+                target = request.view_args.get("user_id") if request.view_args else None
+                db = get_db()
+                db.execute(
+                    "INSERT INTO admin_audit(at,ip,method,path,status,target_user_id) VALUES(?,?,?,?,?,?)",
+                    (now_iso(), _client_ip(), request.method, request.path[:200], response.status_code, target),
+                )
+                db.commit()
             response.headers["Cache-Control"] = "no-store"
         return response
 
@@ -247,30 +250,44 @@ def create_app(config_override: dict | None = None) -> Flask:
 
     @app.route("/register", methods=["GET", "POST"])
     def register():
+        invitation_mode = app.config["REGISTRATION_MODE"] != "approval"
         if request.method == "GET":
-            return render_template("register.html")
+            return render_template("register.html", invitation_mode=invitation_mode)
         _rate_limit("register", _client_ip(), 5, 3600)
         email = request.form.get("email", "").strip().lower()
         password = request.form.get("password", "")
         if not EMAIL_RE.fullmatch(email) or len(email) > 254 or len(password) < 12:
             flash("Adresse mail invalide ou mot de passe de moins de 12 caractères.", "error")
-            return render_template("register.html"), 400
+            return render_template("register.html", invitation_mode=invitation_mode), 400
+        _rate_limit("register_email", email, 5, 3600)
         db = get_db()
-        # Réponse identique pour une adresse nouvelle, déjà inscrite ou bloquée :
+        # Réponse identique pour une adresse nouvelle, déjà inscrite, bloquée ou un code faux :
         # la page ne doit pas révéler qui possède un compte.
         password_hash = PASSWORDS.hash(password)
-        if not db.execute("SELECT 1 FROM blocked_emails WHERE email=?", (email,)).fetchone():
-            try:
-                with db:
-                    db.execute(
-                        "INSERT INTO users(email,password_hash,status,created_at,session_version) "
-                        "VALUES(?,?,'pending',?,?)",
-                        # Version tirée au hasard : un identifiant réattribué n'hérite d'aucune session.
-                        (email, password_hash, now_iso(), secrets.randbits(62)),
-                    )
-            except sqlite3.IntegrityError:
-                pass
-        flash("Demande enregistrée. Le compte sera utilisable après validation par l'administrateur.", "success")
+        code = request.form.get("invitation", "").strip()
+        with db:
+            db.execute("BEGIN IMMEDIATE")
+            blocked = db.execute("SELECT 1 FROM blocked_emails WHERE email=?", (email,)).fetchone()
+            exists = db.execute("SELECT 1 FROM users WHERE email=?", (email,)).fetchone()
+            invitation = None
+            if invitation_mode and code:
+                invitation = db.execute(
+                    "SELECT code_hash FROM invitations WHERE code_hash=? AND email=? AND used_at IS NULL AND expires_at>?",
+                    (_hash_token(code), email, int(time.time())),
+                ).fetchone()
+            if not blocked and not exists and (invitation or not invitation_mode):
+                db.execute(
+                    "INSERT INTO users(id,email,password_hash,status,created_at,session_version) VALUES(?,?,?,?,?,?)",
+                    # Version tirée au hasard : aucune ancienne session ne peut ouvrir ce compte.
+                    (allocate_id(db, "users"), email, password_hash, "approved" if invitation else "pending",
+                     now_iso(), secrets.randbits(62)),
+                )
+                if invitation:
+                    db.execute("UPDATE invitations SET used_at=? WHERE code_hash=?", (now_iso(), invitation["code_hash"]))
+        if invitation_mode:
+            flash("Si le code d'invitation correspond à cette adresse, ton compte est prêt : connecte-toi.", "success")
+        else:
+            flash("Demande enregistrée. Le compte sera utilisable après validation par l'administrateur.", "success")
         return redirect(url_for("login"))
 
     @app.route("/login", methods=["GET", "POST"])
@@ -398,6 +415,18 @@ def create_app(config_override: dict | None = None) -> Flask:
         else:
             flash("Enregistrement ajouté.", "success")
         return redirect(url_for("domain_detail", domain_id=domain_id))
+
+    @app.post("/domains/<int:domain_id>/delete")
+    @_login_required
+    def delete_domain(domain_id: int):
+        try:
+            result = actions.delete_domain(app, g.user["id"], domain_id)
+        except actions.ActionError as exc:
+            _flash_error(exc)
+            return redirect(url_for("domain_detail", domain_id=domain_id))
+        flash(f"Domaine {result['name']} supprimé, sa zone retirée du DNS de l'instance." +
+              ("" if result["synced"] else PENDING), "success")
+        return redirect(url_for("dashboard"))
 
     @app.post("/domains/<int:domain_id>/records/<int:record_id>/delete")
     @_login_required
@@ -574,13 +603,25 @@ def create_app(config_override: dict | None = None) -> Flask:
         flash(f"{count} jeton(s) révoqué(s).", "success")
         return redirect(url_for("tokens"))
 
+    def _decision_email() -> str:
+        data = request.get_json(silent=True)
+        email = data.get("email") if isinstance(data, dict) else None
+        if not isinstance(email, str) or not email.strip():
+            abort(400, "Adresse mail attendue dans le corps JSON : {\"email\": \"...\"}.")
+        return email.strip().lower()
+
     def admin_required(fn):
         @wraps(fn)
         def wrapper(*args, **kwargs):
             header = request.headers.get("Authorization", "")
             supplied = header[7:] if header.startswith("Bearer ") else ""
             if not _same_secret(app.config["ADMIN_TOKEN"], supplied):
+                # Refus comptés sans rien écrire dans le journal : un anonyme ne remplit pas la base.
+                if actions.limit_reached("admin_auth", _client_ip(), 20, 600):
+                    return jsonify({"error": "trop de tentatives"}), 429
+                actions.record_attempt("admin_auth", _client_ip())
                 return jsonify({"error": "non autorisé"}), 401
+            g.admin_ok = True
             return fn(*args, **kwargs)
         return wrapper
 
@@ -595,24 +636,62 @@ def create_app(config_override: dict | None = None) -> Flask:
     @app.post("/admin/api/users/<int:user_id>/approve")
     @admin_required
     def admin_approve(user_id: int):
+        email = _decision_email()
         db = get_db()
         with db:
-            cursor = db.execute("UPDATE users SET status='approved' WHERE id=? AND status='pending'", (user_id,))
+            db.execute("BEGIN IMMEDIATE")
+            # La décision porte sur un couple identifiant-adresse : une demande remplacée entre la
+            # lecture de la liste et la décision n'est jamais approuvée à sa place. Une adresse
+            # bloquée n'est jamais approuvée.
+            cursor = db.execute(
+                "UPDATE users SET status='approved' WHERE id=? AND email=? AND status='pending' "
+                "AND email NOT IN (SELECT email FROM blocked_emails)", (user_id, email),
+            )
         if cursor.rowcount != 1:
-            return jsonify({"error": "compte en attente introuvable"}), 404
+            return jsonify({"error": "compte en attente introuvable pour cette adresse"}), 404
         return jsonify({"id": user_id, "status": "approved"})
 
     @app.post("/admin/api/users/<int:user_id>/reject")
     @admin_required
     def admin_reject(user_id: int):
+        email = _decision_email()
         db = get_db()
-        row = db.execute("SELECT email FROM users WHERE id=? AND status='pending'", (user_id,)).fetchone()
-        if row is None:
-            return jsonify({"error": "compte en attente introuvable"}), 404
         with db:
-            db.execute("INSERT OR IGNORE INTO blocked_emails(email,blocked_at) VALUES(?,?)", (row["email"], now_iso()))
-            db.execute("DELETE FROM users WHERE id=?", (user_id,))
+            db.execute("BEGIN IMMEDIATE")
+            deleted = db.execute("DELETE FROM users WHERE id=? AND email=? AND status='pending'",
+                                 (user_id, email)).rowcount
+            if deleted != 1:
+                db.rollback()
+                return jsonify({"error": "compte en attente introuvable pour cette adresse"}), 404
+            db.execute("INSERT OR IGNORE INTO blocked_emails(email,blocked_at) VALUES(?,?)", (email, now_iso()))
         return jsonify({"id": user_id, "status": "rejected", "email_blocked": True})
+
+    @app.post("/admin/api/domains/delete")
+    @admin_required
+    def admin_delete_domain():
+        """Retire un domaine et ses adresses, par exemple pour le rendre à son titulaire actuel."""
+        data = request.get_json(silent=True)
+        name = data.get("name") if isinstance(data, dict) else None
+        row = get_db().execute("SELECT id FROM domains WHERE name=?", (str(name or "").lower().rstrip("."),)).fetchone()
+        if row is None:
+            return jsonify({"error": "domaine introuvable"}), 404
+        result = actions.delete_domain(app, None, row["id"], force=True)
+        return jsonify({"name": result["name"], "status": "deleted", "synced": result["synced"]})
+
+    @app.post("/admin/api/invitations")
+    @admin_required
+    def admin_invite():
+        """Code d'invitation à usage unique, lié à une adresse, valable 7 jours. Il vaut approbation."""
+        email = _decision_email()
+        if not EMAIL_RE.fullmatch(email) or len(email) > 254:
+            return jsonify({"error": "adresse invalide"}), 422
+        code = secrets.token_urlsafe(18)
+        expires = int(time.time()) + 7 * 86400
+        with get_db() as db:
+            db.execute("DELETE FROM invitations WHERE email=? AND used_at IS NULL", (email,))
+            db.execute("INSERT INTO invitations(code_hash,email,created_at,expires_at) VALUES(?,?,?,?)",
+                       (_hash_token(code), email, now_iso(), expires))
+        return jsonify({"email": email, "code": code, "expires_at": expires})
 
     @app.post("/admin/api/users/<int:user_id>/suspend")
     @admin_required

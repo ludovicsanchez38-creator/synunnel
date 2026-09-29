@@ -55,7 +55,8 @@ def register_approve_login(app, client, email: str) -> int:
     assert response.status_code == 302
     pending = client.get("/admin/api/pending", headers={"Authorization": "Bearer test-admin-token-only"}).json["pending"]
     user_id = next(item["id"] for item in pending if item["email"] == email)
-    response = client.post(f"/admin/api/users/{user_id}/approve", headers={"Authorization": "Bearer test-admin-token-only"})
+    response = client.post(f"/admin/api/users/{user_id}/approve", headers={"Authorization": "Bearer test-admin-token-only"},
+                           json={"email": email})
     assert response.status_code == 200
     response = client.post("/login", data={
         "csrf_token": csrf(client), "email": email, "password": "mot-de-passe-long-123",
@@ -107,12 +108,15 @@ def test_admin_pending_reject_blocks_email_and_audits(app):
     pending = client.get("/admin/api/pending", headers={"Authorization": "Bearer test-admin-token-only"}).json["pending"]
     assert len(pending) == 1
     user_id = pending[0]["id"]
-    assert client.post(f"/admin/api/users/{user_id}/reject", headers={"Authorization": "Bearer test-admin-token-only"}).json["email_blocked"]
+    assert client.post(f"/admin/api/users/{user_id}/reject", headers={"Authorization": "Bearer test-admin-token-only"},
+                       json={"email": "refuse@example.net"}).json["email_blocked"]
     # Même réponse qu'une inscription normale, mais aucun compte n'est recréé.
     assert client.post("/register", data={"csrf_token": token, "email": "refuse@example.net", "password": "long-secret-123"}).status_code == 302
     with app.app_context():
         assert get_db().execute("SELECT COUNT(*) FROM users").fetchone()[0] == 0
-        assert get_db().execute("SELECT COUNT(*) FROM admin_audit").fetchone()[0] == 3
+        # Seuls les appels authentifiés sont journalisés ; le refus anonyme est compté à part.
+        assert get_db().execute("SELECT COUNT(*) FROM admin_audit").fetchone()[0] == 2
+        assert get_db().execute("SELECT COUNT(*) FROM attempts WHERE kind='admin_auth'").fetchone()[0] == 1
 
 
 def test_csrf_and_pending_account_have_no_rights(app):
@@ -285,7 +289,8 @@ def test_shared_access_list_revocation_pending_and_other_owner(app):
     admin = {"Authorization": "Bearer test-admin-token-only"}
     pending_id = next(item["id"] for item in owner.get("/admin/api/pending", headers=admin).json["pending"]
                       if item["email"] == "pending@example.net")
-    assert owner.post(f"/admin/api/users/{pending_id}/reject", headers=admin).status_code == 200
+    assert owner.post(f"/admin/api/users/{pending_id}/reject", headers=admin,
+                      json={"email": "pending@example.net"}).status_code == 200
     assert pending.post("/login", data={"csrf_token": token, "email": "pending@example.net",
                                         "password": "mot-de-passe-long-123", "next": next_url}).status_code == 401
 

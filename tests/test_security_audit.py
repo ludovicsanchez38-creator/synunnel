@@ -66,6 +66,7 @@ def test_caddy_failure_does_not_stop_wireguard_and_the_reverse(tmp_path):
     calls = []
     glb = SYNC["apply"].__globals__
     glb["WG_CONFIG_PATH"], glb["CADDY_ROUTES_PATH"] = tmp_path / "wg0.conf", tmp_path / "routes.caddy"
+    glb["APPLIED_WG"], glb["APPLIED_CADDY"] = tmp_path / "applied-wg", tmp_path / "applied-caddy"
     glb["wireguard_active"] = lambda: False
 
     def fake_run(*args, input=None):
@@ -81,6 +82,13 @@ def test_caddy_failure_does_not_stop_wireguard_and_the_reverse(tmp_path):
         assert "apply_wireguard" in str(exc)
     assert (tmp_path / "routes.caddy").read_text() == "# routes\n"
     assert ("/usr/bin/systemctl", "reload") in calls
+    # Caddy appliqué : l'empreinte est posée ; un second passage ne recharge plus rien.
+    calls.clear()
+    try:
+        SYNC["apply"]("[Interface]\n", "# routes\n")
+    except SystemExit:
+        pass
+    assert ("/usr/bin/systemctl", "reload") not in calls
 
 
 def test_token_filter_covers_every_case_the_api_accepts(app):
@@ -242,8 +250,43 @@ def test_reused_user_id_does_not_inherit_a_session(app):
         db.execute("DELETE FROM users WHERE id=?", (first_id,))
         db.commit()
     newcomer = app.test_client()
-    assert register_approve_login(app, newcomer, "nouveau@example.net") == first_id
+    # Les identifiants ne sont plus jamais réattribués, et la version de session est aléatoire.
+    assert register_approve_login(app, newcomer, "nouveau@example.net") != first_id
     assert b"nouveau@example.net" not in first.get("/dashboard").data
+
+
+def test_admin_decisions_are_bound_to_the_address(app):
+    admin = {"Authorization": "Bearer test-admin-token-only"}
+    client = app.test_client()
+    client.post("/register", data={"csrf_token": csrf(client), "email": "demande@example.net",
+                                   "password": PASSWORD})
+    user_id = client.get("/admin/api/pending", headers=admin).json["pending"][0]["id"]
+    assert client.post(f"/admin/api/users/{user_id}/approve", headers=admin).status_code == 400
+    assert client.post(f"/admin/api/users/{user_id}/approve", headers=admin,
+                       json={"email": "autre@example.net"}).status_code == 404
+    assert client.post(f"/admin/api/users/{user_id}/approve", headers=admin,
+                       json={"email": "demande@example.net"}).status_code == 200
+
+
+def test_invitation_mode_prevents_preregistration(app):
+    app.config["REGISTRATION_MODE"] = "invitation"
+    admin = {"Authorization": "Bearer test-admin-token-only"}
+    attacker = app.test_client()
+    # Un tiers qui préinscrit l'adresse sans le code n'obtient rien.
+    attacker.post("/register", data={"csrf_token": csrf(attacker), "email": "invite@example.net",
+                                     "password": "mot-de-passe-de-l-attaquant", "invitation": "au-hasard"})
+    code = attacker.post("/admin/api/invitations", headers=admin, json={"email": "invite@example.net"}).json["code"]
+    guest = app.test_client()
+    guest.post("/register", data={"csrf_token": csrf(guest), "email": "invite@example.net", "password": PASSWORD,
+                                  "invitation": code})
+    login = guest.post("/login", data={"csrf_token": csrf(guest), "email": "invite@example.net", "password": PASSWORD})
+    assert login.status_code == 302
+    # Le code est à usage unique.
+    other = app.test_client()
+    other.post("/register", data={"csrf_token": csrf(other), "email": "invite@example.net", "password": "x" * 14,
+                                  "invitation": code})
+    with app.app_context():
+        assert get_db().execute("SELECT COUNT(*) FROM users").fetchone()[0] == 1
 
 
 def test_admin_can_suspend_an_approved_account(app):
@@ -293,3 +336,61 @@ def test_login_form_relays_to_protected_address_through_a_page(app):
     # Chromium bloque une redirection hors domaine après un formulaire (CSP form-action) : une page relaie.
     assert page.status_code == 200 and 'http-equiv="refresh"' in body and "prive.relais.example.net" in body
     assert hashlib.sha256(b"x").hexdigest()  # sentinelle d'import
+
+
+def test_domain_page_never_queries_dns(app, monkeypatch):
+    owner = account(app, "cache@example.net")
+    domain_id = add_domain(owner, "cache.example.net")
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("requête DNS sortante depuis une page")
+
+    monkeypatch.setattr("synunnel.actions.delegation_status", forbidden)
+    page = owner.get(f"/domains/{domain_id}")
+    assert page.status_code == 200 and "Vérification en cours" in page.get_data(as_text=True)
+
+
+def test_domain_can_be_deleted_by_owner_and_admin(app):
+    owner = account(app, "suppr@example.net")
+    domain_id = add_domain(owner, "suppr.example.net")
+    token = create_token(owner)
+    client = app.test_client()
+    machine_id = client.post("/api/v1/machines", headers=bearer(token),
+                             json={"name": "nas", "public_key": key(80)}).json["machine"]["id"]
+    client.post("/api/v1/addresses", headers=bearer(token), json={
+        "domain_id": domain_id, "machine_id": machine_id, "name": "nas", "port": 80, "protected": True})
+    assert client.delete(f"/api/v1/domains/{domain_id}", headers=bearer(token)).status_code == 409
+    admin = {"Authorization": "Bearer test-admin-token-only"}
+    removed = client.post("/admin/api/domains/delete", headers=admin, json={"name": "suppr.example.net"})
+    assert removed.status_code == 200
+    with app.app_context():
+        db = get_db()
+        assert db.execute("SELECT COUNT(*) FROM domains").fetchone()[0] == 0
+        assert db.execute("SELECT COUNT(*) FROM addresses").fetchone()[0] == 0
+    # Le vrai titulaire peut maintenant revendiquer le domaine.
+    assert client.post("/api/v1/domains", headers=bearer(token),
+                       json={"domain": "suppr.example.net", "mail_records_checked": True}).status_code == 201
+
+
+def test_import_and_records_are_bounded_and_valid(app, monkeypatch):
+    app.config["MAX_RECORDS_PER_DOMAIN"] = 3
+    owner = account(app, "import@example.net")
+    token = create_token(owner)
+    client = app.test_client()
+    monkeypatch.setattr("synunnel.actions.snapshot_records", lambda domain, selectors: [
+        ("@", "TXT", f'"valeur {n}"', 3600) for n in range(5)])
+    claim = client.post("/api/v1/domains", headers=bearer(token),
+                        json={"domain": "gros.example.net", "mail_records_checked": True}).json["claim"]
+    import test_app
+    test_app.PROOFS["gros.example.net"] = {claim["txt_record"]["value"]}
+    refused = client.post(f"/api/v1/claims/{claim['id']}/verify", headers=bearer(token))
+    assert refused.status_code == 422
+    app.config["MAX_RECORDS_PER_DOMAIN"] = 200
+    monkeypatch.setattr("synunnel.actions.snapshot_records", lambda domain, selectors: [
+        ("@", "MX", f"10 mail.{domain}.", 3600)])
+    domain_id = client.post(f"/api/v1/claims/{claim['id']}/verify", headers=bearer(token)).json["domain"]["id"]
+    for body in ({"name": "@", "type": "CNAME", "content": "ailleurs.example."},
+                 {"name": "x", "type": "AAAA", "content": "fe80::1%eth0"},
+                 {"name": "_" + "a" * 63, "type": "TXT", "content": "long"}):
+        assert client.post(f"/api/v1/domains/{domain_id}/records", headers=bearer(token),
+                           json=body).status_code == 422, body

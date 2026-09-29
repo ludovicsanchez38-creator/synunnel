@@ -2,11 +2,14 @@
 {% block title %}Inscription{% endblock %}
 {% block content %}
 <section class="auth-layout">
-  <div class="intro"><span class="eyebrow">Bienvenue</span><h1>Publiez vos services sur votre domaine.</h1><p>Créez un compte pour préparer votre espace. L'administrateur de cette instance le valide avant que vous puissiez ajouter un domaine.</p><p class="muted">Synunnel n'envoie aucun mail automatique : l'administrateur vous prévient lui-même.</p></div>
-  <div class="card auth-card"><h2>Demander un accès</h2>
+  <div class="intro"><span class="eyebrow">Bienvenue</span><h1>Publiez vos services sur votre domaine.</h1>
+    {% if invitation_mode %}<p>Cette instance fonctionne sur invitation. L'administrateur t'a remis un code lié à ton adresse mail : il ouvre ton compte immédiatement.</p><p class="muted">Pas de code ? Demande-le à l'administrateur de l'instance.</p>
+    {% else %}<p>Créez un compte pour préparer votre espace. L'administrateur de cette instance le valide avant que vous puissiez ajouter un domaine.</p><p class="muted">Synunnel n'envoie aucun mail automatique : l'administrateur vous prévient lui-même.</p>{% endif %}</div>
+  <div class="card auth-card"><h2>{{ "Créer mon compte" if invitation_mode else "Demander un accès" }}</h2>
     <form method="post" action="{{ url_for('register') }}">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <label>Adresse mail<input type="email" name="email" autocomplete="email" required></label>
+      {% if invitation_mode %}<label>Code d'invitation<input name="invitation" autocomplete="off" required></label>{% endif %}
       <label>Mot de passe <span class="hint">12 caractères minimum</span><input type="password" name="password" minlength="12" autocomplete="new-password" required></label>
       <button class="button" type="submit">Créer mon compte</button>
     </form>

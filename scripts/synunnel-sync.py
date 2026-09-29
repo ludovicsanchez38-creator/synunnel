@@ -7,6 +7,7 @@ Installé root:root, appelé uniquement par sudoers depuis le service synunnel.
 import base64
 import binascii
 import fcntl
+import hashlib
 import ipaddress
 import os
 import re
@@ -23,6 +24,18 @@ CADDY_ROUTES_PATH = Path("/etc/caddy/synunnel-routes.caddy")
 CADDYFILE_PATH = Path("/etc/caddy/Caddyfile")
 LOCK_PATH = Path("/run/synunnel-sync.lock")
 FIREWALL_PATH = Path("/etc/synunnel/wg0-firewall.nft")
+# Empreintes de ce qui a réellement été appliqué (et non seulement écrit) : dans /run, elles
+# disparaissent au redémarrage, ce qui force une réapplication complète.
+APPLIED_WG = Path("/run/synunnel-applied-wg")
+APPLIED_CADDY = Path("/run/synunnel-applied-caddy")
+
+
+def digest(text: str) -> str:
+    return hashlib.sha256(text.encode()).hexdigest()
+
+
+def applied(marker: Path, text: str) -> bool:
+    return marker.exists() and marker.read_text() == digest(text)
 HOST_RE = re.compile(r"^[a-z0-9-]+(?:\.[a-z0-9-]+)+$")
 TOKEN_RE = re.compile(r"^[0-9a-f]{24}$")
 
@@ -163,38 +176,44 @@ def apply(new_wg: str, new_routes: str) -> None:
 
 def apply_wireguard(new_wg: str, _routes: str) -> None:
     old_wg = WG_CONFIG_PATH.read_text() if WG_CONFIG_PATH.exists() else ""
-    if new_wg != old_wg:
-        atomic_write(WG_CONFIG_PATH, new_wg, 0o600)
-        try:
-            if wireguard_active():
-                stripped = run("/usr/bin/wg-quick", "strip", str(WG_CONFIG_PATH)).stdout
-                with tempfile.NamedTemporaryFile(mode="wb", dir="/run", prefix="synunnel-wg-", delete=False) as tmp:
-                    tmp.write(stripped)
-                    stripped_path = tmp.name
-                try:
-                    run("/usr/bin/wg", "syncconf", "wg0", stripped_path)
-                finally:
-                    os.unlink(stripped_path)
-            else:
-                run("/usr/bin/systemctl", "start", "wg-quick@wg0")
-        except Exception:
+    if new_wg == old_wg and applied(APPLIED_WG, new_wg) and wireguard_active():
+        return
+    # Écrit mais jamais appliqué (interruption, redémarrage) : on réapplique, c'est idempotent.
+    atomic_write(WG_CONFIG_PATH, new_wg, 0o600)
+    try:
+        if wireguard_active():
+            stripped = run("/usr/bin/wg-quick", "strip", str(WG_CONFIG_PATH)).stdout
+            with tempfile.NamedTemporaryFile(mode="wb", dir="/run", prefix="synunnel-wg-", delete=False) as tmp:
+                tmp.write(stripped)
+                stripped_path = tmp.name
+            try:
+                run("/usr/bin/wg", "syncconf", "wg0", stripped_path)
+            finally:
+                os.unlink(stripped_path)
+        else:
+            run("/usr/bin/systemctl", "start", "wg-quick@wg0")
+    except Exception:
+        if old_wg != new_wg:
             atomic_write(WG_CONFIG_PATH, old_wg, 0o600)
-            raise
-    elif not wireguard_active():
-        # Configuration inchangée mais tunnel arrêté (redémarrage, arrêt manuel) : on le relance.
-        run("/usr/bin/systemctl", "start", "wg-quick@wg0")
+        APPLIED_WG.unlink(missing_ok=True)
+        raise
+    atomic_write(APPLIED_WG, digest(new_wg), 0o600)
 
 
 def apply_caddy(_wg: str, new_routes: str) -> None:
     old_routes = CADDY_ROUTES_PATH.read_text() if CADDY_ROUTES_PATH.exists() else ""
-    if new_routes != old_routes:
-        atomic_write(CADDY_ROUTES_PATH, new_routes, 0o644)
-        try:
-            run("/usr/bin/caddy", "validate", "--config", str(CADDYFILE_PATH), "--adapter", "caddyfile")
-            run("/usr/bin/systemctl", "reload", "caddy")
-        except Exception:
+    if new_routes == old_routes and applied(APPLIED_CADDY, new_routes):
+        return
+    atomic_write(CADDY_ROUTES_PATH, new_routes, 0o644)
+    try:
+        run("/usr/bin/caddy", "validate", "--config", str(CADDYFILE_PATH), "--adapter", "caddyfile")
+        run("/usr/bin/systemctl", "reload", "caddy")
+    except Exception:
+        if old_routes != new_routes:
             atomic_write(CADDY_ROUTES_PATH, old_routes, 0o644)
-            raise
+        APPLIED_CADDY.unlink(missing_ok=True)
+        raise
+    atomic_write(APPLIED_CADDY, digest(new_routes), 0o600)
 
 
 if __name__ == "__main__":
