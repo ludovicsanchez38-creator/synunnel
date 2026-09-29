@@ -395,6 +395,13 @@ done
 install -o root -g root -m 0644 "$REPO_DIR/config/wg0-firewall.nft" /etc/synunnel/wg0-firewall.nft
 install -d -o root -g root -m 0755 /etc/systemd/system/caddy.service.d
 install -o root -g root -m 0644 "$REPO_DIR/config/caddy-synunnel.conf" /etc/systemd/system/caddy.service.d/synunnel.conf
+# Journaux système (requêtes de Caddy et de Gunicorn comprises) gardés 30 jours au plus, comme l'annonce la
+# notice de confidentialité. Le réglage vaut pour tout le journal de la machine.
+install -d -o root -g root -m 0755 /etc/systemd/journald.conf.d
+if ! cmp -s "$REPO_DIR/config/journald-synunnel.conf" /etc/systemd/journald.conf.d/synunnel.conf; then
+  install -o root -g root -m 0644 "$REPO_DIR/config/journald-synunnel.conf" /etc/systemd/journald.conf.d/synunnel.conf
+  systemctl restart systemd-journald
+fi
 
 # Caddy validé, unités écrites et chargées (elles lancent `python -m gunicorn`, valable avec l'ancien comme
 # avec le nouvel environnement) : la bascule peut avoir lieu, aucune unité chargée ne dépend plus des

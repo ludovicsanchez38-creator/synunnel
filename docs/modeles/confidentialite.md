@@ -28,7 +28,7 @@ Pour ne plus figurer dans une liste, demande-le à la personne qui t'a invité o
 ## Toute personne qui visite l'instance
 
 - Limitation des tentatives (adresse IP, type d'action) : **24 heures**.
-- Journaux techniques du serveur web (adresse IP, date, méthode, chemin, statut ; jetons, codes, cookies et en-têtes d'autorisation retirés) : [durée de conservation du journal système de l'hébergement].
+- Journaux techniques du serveur web (adresse IP, date, méthode, chemin, statut ; jetons, codes, cookies et en-têtes d'autorisation retirés) : **30 jours** (durée posée par l'installateur pour tout le journal système).
 
 # Pourquoi
 

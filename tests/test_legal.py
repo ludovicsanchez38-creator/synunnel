@@ -118,3 +118,17 @@ def test_privacy_template_tells_guests_about_the_security_log():
     template = (Path(__file__).resolve().parent.parent / "docs" / "modeles" / "confidentialite.md").read_text()
     guests = template.split("## Personnes invitées sans compte", 1)[1].split("\n## ", 1)[0]
     assert "Journal de sécurité" in guests and "365 jours" in guests and "adresse IP" in guests
+
+
+def test_system_journal_is_kept_thirty_days_as_the_notice_says():
+    """Mentions validées le 29/09/2026 : journaux techniques 30 jours. L'installateur pose la durée."""
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+    dropin = (root / "config" / "journald-synunnel.conf").read_text()
+    assert "[Journal]" in dropin and "MaxRetentionSec=30day" in dropin
+    installer = (root / "scripts" / "install.sh").read_text()
+    assert "/etc/systemd/journald.conf.d/synunnel.conf" in installer
+    assert "systemctl restart systemd-journald" in installer
+    template = (root / "docs" / "modeles" / "confidentialite.md").read_text()
+    assert "**30 jours**" in template.split("## Toute personne qui visite l'instance", 1)[1]
