@@ -85,3 +85,37 @@ def test_dependencies_are_pinned_patched_and_installed_from_the_lock():
     installer = (root / "scripts" / "install.sh").read_text()
     assert "--require-hashes" in installer and "requirements.lock" in installer
     assert "[dev]" not in installer and "install -e" not in installer
+
+
+ADMIN = {"Authorization": "Bearer test-admin-token-only"}
+
+
+def test_admin_api_is_refused_through_the_public_proxy(app):
+    """Bloquant 4 : l'API d'administration ne répond qu'en local, jamais à travers Caddy."""
+    client = app.test_client()
+    assert client.get("/admin/api/pending", headers=ADMIN).status_code == 200
+    for proxied in ({"X-Real-IP": "203.0.113.9"}, {"X-Forwarded-For": "203.0.113.9"}):
+        response = client.get("/admin/api/pending", headers={**ADMIN, **proxied})
+        assert response.status_code == 404, proxied
+
+
+def test_admin_limiter_applies_before_the_token_comparison(app):
+    client = app.test_client()
+    for _ in range(20):
+        assert client.get("/admin/api/pending", headers={"Authorization": "Bearer mauvais"}).status_code == 401
+    # Au-delà du plafond, même le bon jeton attend : la comparaison n'est plus tentée.
+    assert client.get("/admin/api/pending", headers=ADMIN).status_code == 429
+
+
+def test_caddy_template_hides_admin_api_on_the_public_name():
+    import importlib.util
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+    spec = importlib.util.spec_from_file_location("render_caddy", root / "scripts" / "render-caddy.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    rendered = module.render_caddy((root / "config" / "Caddyfile").read_text(), "synunnel.fr", "", "admin@example.org")
+    block = rendered.split("handle @synunnel_dashboard {", 1)[1].split("# __REDIRECT", 1)[0]
+    admin = block.index("path /admin/*")
+    assert block.index("respond 404", admin) < block.index("reverse_proxy 127.0.0.1:8000")

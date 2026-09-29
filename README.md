@@ -60,7 +60,7 @@ Le dépôt peut vivre ailleurs (le service est généré pour son emplacement r�
 
 UFW reçoit les règles des ports publics mais **n'est pas activé** par le script, pour ne pas couper votre accès SSH. Pour l'activer : `sudo ufw allow 22/tcp && sudo ufw enable` (adaptez le port SSH). Le tunnel, lui, est filtré dans tous les cas par sa propre table nftables.
 
-Les comptes s'ouvrent par invitation (`REGISTRATION_MODE=invitation`, par défaut) : créez une invitation avec l'[API d'administration](docs/API-ADMIN.md) (jeton dans `/etc/synunnel/synunnel.env`), puis inscrivez-vous sur `https://tunnel.example.org/register` avec le code. Le mode `approval` (inscription libre puis approbation) reste possible ; ses limites sont décrites dans l'API d'administration.
+Les comptes s'ouvrent par invitation (`REGISTRATION_MODE=invitation`, par défaut) : créez une invitation avec l'[API d'administration](docs/API-ADMIN.md), appelée en local sur le VPS (`http://127.0.0.1:8000/admin/api/...`, jeton dans `/etc/synunnel/synunnel.env`), puis inscrivez-vous sur `https://tunnel.example.org/register` avec le code. Le mode `approval` (inscription libre puis approbation) reste possible ; ses limites sont décrites dans l'API d'administration.
 
 ## Utilisation
 

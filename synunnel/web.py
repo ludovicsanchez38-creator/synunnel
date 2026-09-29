@@ -677,12 +677,17 @@ def create_app(config_override: dict | None = None) -> Flask:
     def admin_required(fn):
         @wraps(fn)
         def wrapper(*args, **kwargs):
+            # L'API d'administration ne répond qu'en local (127.0.0.1:8000, par SSH sur le VPS) : une requête
+            # passée par Caddy porte X-Real-IP ou X-Forwarded-For, posés par le proxy, et reçoit un 404.
+            if request.headers.get("X-Real-IP") or request.headers.get("X-Forwarded-For"):
+                abort(404)
             header = request.headers.get("Authorization", "")
             supplied = header[7:] if header.startswith("Bearer ") else ""
+            # Plafond vérifié avant la comparaison : au-delà, même le bon jeton attend.
+            if actions.limit_reached("admin_auth", _client_ip(), 20, 600):
+                return jsonify({"error": "trop de tentatives"}), 429
             if not _same_secret(app.config["ADMIN_TOKEN"], supplied):
                 # Refus comptés sans rien écrire dans le journal : un anonyme ne remplit pas la base.
-                if actions.limit_reached("admin_auth", _client_ip(), 20, 600):
-                    return jsonify({"error": "trop de tentatives"}), 429
                 actions.record_attempt("admin_auth", _client_ip())
                 return jsonify({"error": "non autorisé"}), 401
             g.admin_ok = True

@@ -34,6 +34,11 @@ https:// {
         handle @synunnel_dashboard_internal {
             respond 404
         }
+        # L'API d'administration ne s'appelle qu'en local, sur 127.0.0.1:8000 (voir docs/API-ADMIN.md).
+        @synunnel_dashboard_admin path /admin/*
+        handle @synunnel_dashboard_admin {
+            respond 404
+        }
         handle {
             reverse_proxy 127.0.0.1:8000 {
                 header_up X-Real-IP {remote_host}

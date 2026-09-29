@@ -396,10 +396,17 @@ def main() -> None:
         if status != 302 or web("/dashboard")[0] != 200:
             raise AssertionError("Connexion en deux temps refusée.")
         print("Double authentification : enrôlement et connexion en deux temps par HTTPS : OK")
-        ticket = json.loads(run(*base, "--resolve", resolve, "--header", f"Authorization: Bearer {values['ADMIN_TOKEN']}",
+        # L'API d'administration ne répond qu'en local ; par le nom public, Caddy la cache (404).
+        admin_public = run(*base, "--resolve", resolve, "--output", "/dev/null", "--write-out", "%{http_code}",
+                           "--header", f"Authorization: Bearer {values['ADMIN_TOKEN']}",
+                           f"https://{dashboard_host}/admin/api/pending").stdout.strip()
+        if admin_public != "404":
+            raise AssertionError(f"L'API d'administration répond par le nom public (statut {admin_public}).")
+        ticket = json.loads(run(*base, "--header", f"Authorization: Bearer {values['ADMIN_TOKEN']}",
                                 "--header", "Content-Type: application/json", "--data",
                                 json.dumps({"email": EMAIL, "scope": "2fa"}),
-                                f"https://{dashboard_host}/admin/api/users/{user_id}/recovery").stdout)["ticket"]
+                                f"http://127.0.0.1:8000/admin/api/users/{user_id}/recovery").stdout)["ticket"]
+        print("API d'administration : 404 par le nom public, joignable en local : OK")
         jar.unlink()
         _, _, html = web("/recover")
         status, _, _ = web("/recover", {"csrf_token": csrf_of(html), "email": EMAIL, "ticket": ticket,
@@ -519,8 +526,8 @@ def main() -> None:
         # Mot de passe oublié par mail, de bout en bout, et journal de Caddy expurgé sur un 502.
         admin = ["--header", f"Authorization: Bearer {values['ADMIN_TOKEN']}", "--header",
                  "Content-Type: application/json"]
-        run(*base, "--resolve", resolve, *admin, "--data", json.dumps({"email": EMAIL}),
-            f"https://{dashboard_host}/admin/api/users/{user_id}/verify-email")
+        run(*base, *admin, "--data", json.dumps({"email": EMAIL}),
+            f"http://127.0.0.1:8000/admin/api/users/{user_id}/verify-email")
         jar.unlink(missing_ok=True)
         before = len(inbox)
         _, _, html = web("/forgot")

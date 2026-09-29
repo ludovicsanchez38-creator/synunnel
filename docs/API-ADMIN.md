@@ -1,8 +1,8 @@
 # API d'administration
 
-L'administrateur (ou un script à lui) utilise cette API pour inviter, approuver, refuser ou suspendre des comptes, émettre des tickets de récupération, attester une adresse et retirer un domaine. Synunnel n'envoie de mails que si une boîte d'envoi est configurée (voir le README), et jamais pour les invitations. Tous les appels passent en HTTPS par le nom du tableau de bord, avec le jeton `ADMIN_TOKEN` dans `Authorization: Bearer ...`.
+L'administrateur (ou un script à lui) utilise cette API pour inviter, approuver, refuser ou suspendre des comptes, émettre des tickets de récupération, attester une adresse et retirer un domaine. Synunnel n'envoie de mails que si une boîte d'envoi est configurée (voir le README), et jamais pour les invitations. **L'API ne répond qu'en local, sur le VPS** : les appels se font sur `http://127.0.0.1:8000/admin/api/...` depuis une session SSH, avec le jeton `ADMIN_TOKEN` dans `Authorization: Bearer ...`. Par le nom public, Caddy répond 404, et l'application refuse aussi toute requête passée par un proxy (`X-Real-IP` ou `X-Forwarded-For`) : une fuite du jeton ne suffit donc pas, il faut aussi un accès SSH au serveur.
 
-Le jeton est généré à l'installation dans `/etc/synunnel/synunnel.env`. Il reste hors du dépôt ; un outil qui l'utilise le garde dans son propre magasin de secrets, jamais dans une URL ni une messagerie. Chaque appel authentifié est journalisé dans `admin_audit` (heure UTC, IP, méthode, chemin, statut). Les appels refusés ne sont pas journalisés en base : ils sont comptés, et au-delà de 20 refus en 10 minutes depuis une même adresse, l'API répond 429.
+Le jeton est généré à l'installation dans `/etc/synunnel/synunnel.env`. Il reste hors du dépôt ; un outil qui l'utilise le garde dans son propre magasin de secrets, jamais dans une URL ni une messagerie. Chaque appel authentifié est journalisé dans `admin_audit` (heure UTC, IP, méthode, chemin, statut). Les appels refusés ne sont pas journalisés en base : ils sont comptés, et au-delà de 20 refus en 10 minutes depuis une même adresse, l'API répond 429, même au bon jeton (le plafond est vérifié avant la comparaison).
 
 ## Inscription : deux modes
 
@@ -27,12 +27,15 @@ L'adresse exigée dans le corps lie chaque décision à la demande que tu as lue
 Exemple :
 
 ```bash
+ssh admin@tunnel.example.org   # puis, sur le VPS :
 read -rsp 'Jeton admin Synunnel : ' SYNUNNEL_ADMIN_TOKEN; printf '\n'
 curl --fail --silent --show-error -H "Authorization: Bearer ${SYNUNNEL_ADMIN_TOKEN}" \
   -H 'Content-Type: application/json' -d '{"email":"ami@example.org"}' \
-  https://tunnel.example.org/admin/api/invitations
+  http://127.0.0.1:8000/admin/api/invitations
 unset SYNUNNEL_ADMIN_TOKEN
 ```
+
+Le jeton se lit sur le VPS avec `sudo grep ^ADMIN_TOKEN= /etc/synunnel/synunnel.env` ; il ne quitte pas la machine.
 
 Un script peut surveiller `pending` et prévenir l'administrateur ; la décision, elle, reste humaine.
 
@@ -44,6 +47,6 @@ Téléphone perdu sans code de secours, ou mot de passe oublié sans adresse vé
 read -rsp 'Jeton admin Synunnel : ' SYNUNNEL_ADMIN_TOKEN; printf '\n'
 curl --fail --silent --show-error -H "Authorization: Bearer ${SYNUNNEL_ADMIN_TOKEN}" \
   -H 'Content-Type: application/json' -d '{"email":"ami@example.org","scope":"2fa"}' \
-  https://tunnel.example.org/admin/api/users/42/recovery
+  http://127.0.0.1:8000/admin/api/users/42/recovery
 unset SYNUNNEL_ADMIN_TOKEN
 ```
