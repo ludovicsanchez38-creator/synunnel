@@ -424,3 +424,48 @@ def test_a_stale_removal_authorisation_never_erases_a_newer_incarnation(app, mon
     with app.app_context():
         row = get_db().execute("SELECT forced, generation FROM zone_removals WHERE name='reprise.example'").fetchone()
     assert seen == ["ancienne"] and row is not None and tuple(row) == (0, "nouvelle")
+
+
+def test_powerdns_deletion_runs_outside_the_sqlite_write_lock(app, monkeypatch):
+    """Cinquième passe Codex, constat 24 : l'effacement PowerDNS tournait sous BEGIN IMMEDIATE ; des
+    effacements lents bloquaient toute écriture de l'application (« database is locked », HTTP 500)."""
+    import sqlite3
+
+    from synunnel import actions
+    from synunnel.db import get_db, init_db
+
+    writes = []
+
+    class SlowPowerDNS:
+        def delete_zone(self, name):
+            # Pendant l'appel à PowerDNS, une autre requête doit pouvoir écrire sans attendre.
+            other = sqlite3.connect(app.config["DATABASE"], timeout=0.2)
+            other.execute("INSERT INTO attempts(kind,key,at) VALUES('essai','verrou',0)")
+            other.commit()
+            other.close()
+            writes.append(name)
+
+    app.config["PDNS_ENABLED"] = True
+    monkeypatch.setattr("synunnel.actions._pdns", lambda app_: SlowPowerDNS())
+    with app.app_context():
+        init_db()
+        db = get_db()
+        with db:
+            db.execute("INSERT INTO zone_removals(name,at,forced,generation) VALUES('lente.example','x',0,'g1')")
+        assert actions.remove_zone(app, "lente.example", generation="g1") is True
+        assert writes == ["lente.example"]
+        assert db.execute("SELECT 1 FROM zone_removals WHERE name='lente.example'").fetchone() is None
+
+
+def test_older_removals_receive_a_generation_so_the_check_is_never_skipped(app):
+    """Cinquième passe Codex, résidu du constat 22 : un retrait antérieur à la colonne gardait
+    generation=NULL, ce qui désactivait la vérification."""
+    from synunnel.db import get_db, init_db
+
+    with app.app_context():
+        db = get_db()
+        with db:
+            db.execute("INSERT INTO zone_removals(name,at,forced) VALUES('ancien.example','x',1)")
+        init_db()
+        row = db.execute("SELECT generation FROM zone_removals WHERE name='ancien.example'").fetchone()
+        assert row[0]

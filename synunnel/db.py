@@ -333,6 +333,8 @@ def init_db() -> None:
     if "generation" not in {row[1] for row in db.execute("PRAGMA table_info(zone_removals)")}:
         # Génération de chaque retrait : une autorisation lue plus tôt ne sert jamais à un retrait plus récent.
         db.execute("ALTER TABLE zone_removals ADD COLUMN generation TEXT")
+    # Tout retrait porte une génération, anciens compris : la vérification avant effacement n'est jamais sautée.
+    db.execute("UPDATE zone_removals SET generation=lower(hex(randomblob(8))) WHERE generation IS NULL")
     if "domain_id" not in {row[1] for row in db.execute("PRAGMA table_info(domain_claims)")}:
         db.execute("ALTER TABLE domain_claims ADD COLUMN domain_id INTEGER")
     for table in ("users", "access_codes", "host_sessions"):

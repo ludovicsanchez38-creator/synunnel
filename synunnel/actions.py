@@ -544,10 +544,13 @@ def remove_zone(app: Flask, name: str, generation: str | None = None) -> bool:
     cette génération, relue sous transaction juste avant l'effacement : un nom recréé, ou supprimé de
     nouveau entre-temps, n'est jamais effacé au titre d'une autorisation plus ancienne.
     """
+    # Le verrou de zone est pris avant la relecture : une projection de la même zone (création d'une
+    # nouvelle incarnation comprise) attend la fin de l'effacement, puis recrée la zone si besoin.
     lock = zone_lock(app, name) if app.config["PDNS_ENABLED"] else None
     try:
         db = get_db()
         with db:
+            # Transaction courte : relecture seulement, jamais d'appel à PowerDNS sous le verrou SQLite.
             db.execute("BEGIN IMMEDIATE")
             if db.execute("SELECT 1 FROM domains WHERE name=?", (name,)).fetchone():
                 # Le nom a une nouvelle incarnation : l'ancienne suppression ne la vise pas.
@@ -557,9 +560,14 @@ def remove_zone(app: Flask, name: str, generation: str | None = None) -> bool:
                 row = db.execute("SELECT generation FROM zone_removals WHERE name=?", (name,)).fetchone()
                 if row is None or row["generation"] != generation:
                     return True
-            if lock is not None:
-                _pdns(app).delete_zone(name)
-            db.execute("DELETE FROM zone_removals WHERE name=?", (name,))
+        if lock is not None:
+            _pdns(app).delete_zone(name)
+        with db:
+            # Seule la pierre tombale de ce retrait-ci disparaît, jamais celle d'un retrait plus récent.
+            if generation is None:
+                db.execute("DELETE FROM zone_removals WHERE name=?", (name,))
+            else:
+                db.execute("DELETE FROM zone_removals WHERE name=? AND generation=?", (name, generation))
     except requests.RequestException:
         return False
     finally:
