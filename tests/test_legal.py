@@ -132,3 +132,19 @@ def test_system_journal_is_kept_thirty_days_as_the_notice_says():
     assert "systemctl restart systemd-journald" in installer
     template = (root / "docs" / "modeles" / "confidentialite.md").read_text()
     assert "**30 jours**" in template.split("## Toute personne qui visite l'instance", 1)[1]
+
+
+def test_journal_retention_is_applied_on_every_run_and_web_logs_skip_syslog():
+    """Troisième passe Codex, constats 19 et 20 : un redémarrage de journald raté n'était jamais repris (le
+    fichier, déjà identique, sautait l'étape), et la copie rsyslog des journaux web dépassait 30 jours."""
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+    installer = (root / "scripts" / "install.sh").read_text()
+    journald = installer[installer.index("install -d -o root -g root -m 0755 /etc/systemd/journald.conf.d"):]
+    journald = journald[:journald.index("systemctl restart systemd-journald")]
+    assert "cmp -s" not in journald
+    rsyslog = (root / "config" / "rsyslog-synunnel.conf").read_text()
+    assert "$programname == 'caddy'" in rsyslog and "$programname == 'synunnel'" in rsyslog and "stop" in rsyslog
+    assert "/etc/rsyslog.d/10-synunnel.conf" in installer and "systemctl restart rsyslog" in installer
+    assert "SyslogIdentifier=synunnel" in (root / "config" / "synunnel.service").read_text()

@@ -9,6 +9,8 @@ User=synunnel
 Group=synunnel
 WorkingDirectory=@REPO_DIR@
 EnvironmentFile=/etc/synunnel/synunnel.env
+# Identifiant fixe dans le journal (filtré de la copie rsyslog, voir config/rsyslog-synunnel.conf).
+SyslogIdentifier=synunnel
 ExecStart=@REPO_DIR@/.venv/bin/python -m gunicorn --workers 2 --threads 8 --timeout 30 --bind 127.0.0.1:8000 --access-logfile - --access-logformat "%%(h)s %%(t)s \"%%(m)s %%(U)s\" %%(s)s %%(B)s" --error-logfile - synunnel:create_app()
 Restart=on-failure
 RestartSec=3
