@@ -187,8 +187,9 @@ def delegation_status(domain: str, nameservers: tuple[str, str] | None = None) -
     """Interroge directement un serveur de la zone parente.
 
     Renvoie (état, serveurs désignés) : True si la parente désigne tous les serveurs de l'instance, False
-    sur une réponse exploitable qui montre la délégation ailleurs ou absente (NXDOMAIN, ou SOA de la parente
-    sans NS), None dès que la réponse ne prouve rien (erreur, troncature persistante, NS d'un autre nom).
+    sur une réponse exploitable qui montre la délégation ailleurs (referral de la parente) ou absente (réponse
+    négative qui fait autorité, avec le SOA de la parente), None dès que la réponse ne prouve rien (erreur,
+    troncature persistante, NS d'un autre nom, réponse de cache, négative sans autorité).
     Une suppression ne s'appuie que sur False, et encore faut-il qu'aucun serveur de l'instance ne figure
     dans la liste (voir still_designated).
     """
@@ -205,21 +206,29 @@ def delegation_status(domain: str, nameservers: tuple[str, str] | None = None) -
         return None, []
     if response.flags & dns.flags.TC or response.rcode() not in (dns.rcode.NOERROR, dns.rcode.NXDOMAIN):
         return None, []
-    # Seuls comptent les NS du domaine lui-même, pas ceux d'un autre nom glissés dans la réponse.
-    seen = {
-        item.target.to_text().lower()
-        for section in (response.answer, response.authority)
-        for rrset in section if rrset.rdtype == dns.rdatatype.NS and rrset.name == name
-        for item in rrset
-    }
-    if not seen:
-        parent_soa = any(rrset.rdtype == dns.rdatatype.SOA and name.is_subdomain(rrset.name) and rrset.name != name
-                         for rrset in response.authority)
-        if response.rcode() == dns.rcode.NXDOMAIN or parent_soa:
-            return False, []
-        return None, []
+
+    def designated(section) -> set[str]:
+        # Seuls comptent les NS du domaine lui-même, pas ceux d'un autre nom glissés dans la réponse.
+        return {item.target.to_text().lower() for rrset in section
+                if rrset.rdtype == dns.rdatatype.NS and rrset.name == name for item in rrset}
+
+    referral, answered = designated(response.authority), designated(response.answer)
+    seen = referral | answered
     expected = {item.lower() for item in (nameservers or configured_nameservers())}
-    return expected <= seen, sorted(seen)
+    authoritative = bool(response.flags & dns.flags.AA)
+    if seen & expected:
+        # Un serveur de l'instance encore cité, d'où qu'il vienne : la délégation n'est pas retirée.
+        return expected <= seen, sorted(seen)
+    if answered and not authoritative:
+        # NS en section réponse sans AA : une réponse de cache, qui ne prouve rien.
+        return None, []
+    if seen:
+        return False, sorted(seen)
+    # Absence de délégation : seulement sur une réponse qui fait autorité, avec le SOA de la parente.
+    parent_soa = any(rrset.rdtype == dns.rdatatype.SOA and rrset.name == name.parent() for rrset in response.authority)
+    if authoritative and parent_soa:
+        return False, []
+    return None, []
 
 
 def still_designated(active: bool | None, seen: list[str], nameservers: tuple[str, str]) -> bool | None:

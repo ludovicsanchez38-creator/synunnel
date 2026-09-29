@@ -15,8 +15,10 @@ DOMAIN = "client.example."
 OURS = ("ns1.synunnel.fr.", "ns2.synunnel.fr.")
 
 
-def _response(rcode=dns.rcode.NOERROR, authority=(), answer=(), truncated=False):
+def _response(rcode=dns.rcode.NOERROR, authority=(), answer=(), truncated=False, authoritative=False):
     response = dns.message.make_response(dns.message.make_query(DOMAIN, "NS"))
+    if authoritative:
+        response.flags |= dns.flags.AA
     response.set_rcode(rcode)
     for section, rrsets in ((response.authority, authority), (response.answer, answer)):
         for name, kind, *values in rrsets:
@@ -75,12 +77,29 @@ def test_ns_records_of_another_name_prove_nothing(parent):
     assert synunnel_dns.delegation_status("client.example", OURS)[0] is None
 
 
-def test_answer_without_delegation_and_with_the_parent_soa_is_a_removal(parent):
-    parent["response"] = _response(authority=[("example.", "SOA", "a.nic.example. h.example. 1 2 3 4 5")])
+PARENT_SOA = ("example.", "SOA", "a.nic.example. h.example. 1 2 3 4 5")
+
+
+def test_authoritative_answer_without_delegation_and_with_the_parent_soa_is_a_removal(parent):
+    parent["response"] = _response(authority=[PARENT_SOA], authoritative=True)
     assert synunnel_dns.delegation_status("client.example", OURS) == (False, [])
-    parent["response"] = _response(rcode=dns.rcode.NXDOMAIN,
-                                   authority=[("example.", "SOA", "a.nic.example. h.example. 1 2 3 4 5")])
+    parent["response"] = _response(rcode=dns.rcode.NXDOMAIN, authority=[PARENT_SOA], authoritative=True)
     assert synunnel_dns.delegation_status("client.example", OURS) == (False, [])
+
+
+@pytest.mark.parametrize("response", [
+    # Réponse négative sans le bit AA : elle ne vient pas d'un serveur qui fait autorité.
+    lambda: _response(rcode=dns.rcode.NXDOMAIN),
+    lambda: _response(rcode=dns.rcode.NXDOMAIN, authority=[PARENT_SOA]),
+    lambda: _response(authority=[PARENT_SOA]),
+    # SOA d'une autre zone que la parente (la racine), même avec AA.
+    lambda: _response(authority=[(".", "SOA", "a.root. h.root. 1 2 3 4 5")], authoritative=True),
+    # NS du domaine dans la section réponse, sans AA : une réponse de cache, qui ne prouve rien.
+    lambda: _response(answer=[(DOMAIN, "NS", "ns1.hebergeur.net.")]),
+], ids=["nxdomain-sans-aa", "nxdomain-soa-sans-aa", "nodata-sans-aa", "soa-racine", "ns-de-cache"])
+def test_negative_or_cached_answers_without_authority_prove_nothing(parent, response):
+    parent["response"] = response()
+    assert synunnel_dns.delegation_status("client.example", OURS)[0] is None
 
 
 def test_delegation_to_another_host_only_is_a_removal(parent):
