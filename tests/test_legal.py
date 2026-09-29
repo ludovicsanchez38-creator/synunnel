@@ -108,3 +108,13 @@ def test_readme_recipe_covers_an_instance_already_installed():
     section = readme.split("**Mentions légales et confidentialité**", 1)[1].split("Le dépôt peut vivre", 1)[0]
     assert "font foi" in section and "OPERATOR_NAME='" in section and "/etc/synunnel/synunnel.env" in section
     assert "root:synunnel" in section and "relancez" in section.lower()
+
+
+def test_privacy_template_tells_guests_about_the_security_log():
+    """Constat 8 de la revue Codex : demandes, entrées et sorties d'un invité sont journalisées 365 jours,
+    avec son adresse, le service et l'adresse IP ; la section des invités doit le dire."""
+    from pathlib import Path
+
+    template = (Path(__file__).resolve().parent.parent / "docs" / "modeles" / "confidentialite.md").read_text()
+    guests = template.split("## Personnes invitées sans compte", 1)[1].split("\n## ", 1)[0]
+    assert "Journal de sécurité" in guests and "365 jours" in guests and "adresse IP" in guests

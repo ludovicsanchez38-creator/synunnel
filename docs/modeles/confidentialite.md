@@ -21,6 +21,7 @@ Le titulaire d'une adresse protégée peut inscrire ton adresse mail dans sa lis
 - Ton adresse mail dans la liste d'accès : **tant que le titulaire l'y laisse**.
 - Tes demandes de code (adresse mail, service visé, compteur d'essais, jamais le code en clair) : **24 heures après leur expiration** ; compteurs anti-abus : **48 heures**.
 - Ta session sur le service : **12 heures**.
+- Journal de sécurité (tes demandes de code, entrées, verrouillages après trop d'essais et sorties, avec ton adresse mail, le service visé et ton adresse IP) : **365 jours**, pour retracer un abus ou une intrusion.
 
 Pour ne plus figurer dans une liste, demande-le à la personne qui t'a invité ou écris à [adresse mail].
 
