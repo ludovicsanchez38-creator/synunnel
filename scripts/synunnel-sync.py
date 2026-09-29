@@ -110,7 +110,8 @@ def caddy_routes(db: sqlite3.Connection) -> str:
         lines.extend([
             f"@synunnel_host_{n} host {host}",
             f"handle @synunnel_host_{n} {{",
-            f"    @synunnel_callback_{n} path /__synunnel/auth/callback",
+            # Chemins réservés de Synunnel sur l'adresse (callback d'accès, sortie d'un invité).
+            f"    @synunnel_callback_{n} path /__synunnel/*",
             f"    handle @synunnel_callback_{n} {{",
             "        reverse_proxy 127.0.0.1:8000",
             "    }",
@@ -129,7 +130,10 @@ def caddy_routes(db: sqlite3.Connection) -> str:
             "        forward_auth 127.0.0.1:8000 {",
             f"            uri /internal/caddy/auth?route={token}",
             "        }",
-            f"        reverse_proxy {parsed_ip}:{port}",
+            f"        reverse_proxy {parsed_ip}:{port} {{",
+            # Le cookie d'accès Synunnel ne quitte jamais Caddy : le service de la machine ne le voit pas.
+            '            header_up Cookie "__Host-synunnel-access=[^;]*(;[[:space:]]*)?" ""',
+            "        }",
             "    }",
             "}",
         ])
