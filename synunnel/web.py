@@ -708,9 +708,11 @@ def create_app(config_override: dict | None = None) -> Flask:
     def admin_required(fn):
         @wraps(fn)
         def wrapper(*args, **kwargs):
-            # L'API d'administration ne répond qu'en local (127.0.0.1:8000, par SSH sur le VPS) : une requête
-            # passée par Caddy porte X-Real-IP ou X-Forwarded-For, posés par le proxy, et reçoit un 404.
-            if request.headers.get("X-Real-IP") or request.headers.get("X-Forwarded-For"):
+            # L'API d'administration ne répond qu'en local (127.0.0.1:8000, par SSH sur le VPS) : le pair doit
+            # être la boucle locale, et une requête passée par Caddy, qui porte X-Real-IP ou X-Forwarded-For
+            # (même vides), reçoit un 404. La garde ne dépend donc pas seulement de l'écoute sur 127.0.0.1.
+            if (request.remote_addr not in {"127.0.0.1", "::1"}
+                    or "X-Real-IP" in request.headers or "X-Forwarded-For" in request.headers):
                 abort(404)
             header = request.headers.get("Authorization", "")
             supplied = header[7:] if header.startswith("Bearer ") else ""

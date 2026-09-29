@@ -240,3 +240,14 @@ def test_failed_swap_puts_the_previous_environment_back(tmp_path):
                          check=False)
     assert run.returncode != 0
     assert (repo / ".venv" / "ancien").exists() and not (repo / ".venv.prev").exists()
+
+
+def test_admin_api_requires_a_loopback_peer_and_no_proxy_header_even_empty(app):
+    """Constat 9 de la revue Codex : la garde reposait sur la valeur des en-têtes, pas sur l'origine."""
+    client = app.test_client()
+    assert client.get("/admin/api/pending", headers=ADMIN).status_code == 200
+    assert client.get("/admin/api/pending", headers=ADMIN, environ_base={"REMOTE_ADDR": "::1"}).status_code == 200
+    remote = client.get("/admin/api/pending", headers=ADMIN, environ_base={"REMOTE_ADDR": "203.0.113.8"})
+    assert remote.status_code == 404
+    for empty in ({"X-Forwarded-For": ""}, {"X-Real-IP": ""}):
+        assert client.get("/admin/api/pending", headers={**ADMIN, **empty}).status_code == 404, empty
