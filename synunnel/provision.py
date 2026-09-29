@@ -14,6 +14,14 @@ from .db import get_db, now_iso
 from .dns import PowerDNS, fqdn, normalize_domain, relative_name, snapshot_records
 
 
+def _refuse_nested(db, domain_name: str) -> None:
+    if db.execute(
+        "SELECT 1 FROM domains WHERE substr(?1, -length(name) - 1)='.' || name "
+        "OR substr(name, -length(?1) - 1)='.' || ?1", (domain_name,),
+    ).fetchone():
+        raise ValueError("Ce domaine recouvre une zone déjà gérée par l'instance.")
+
+
 def generate_keypair() -> tuple[str, str]:
     """Paire WireGuard (privée, publique) générée par l'outil officiel."""
     private = subprocess.run(["wg", "genkey"], check=True, capture_output=True, text=True).stdout.strip()
@@ -52,11 +60,8 @@ def provision_site(
     existing_domain = db.execute("SELECT id,user_id FROM domains WHERE name=?", (domain_name,)).fetchone()
     if existing_domain and existing_domain["user_id"] != user_id:
         raise ValueError("Domaine déjà rattaché à un autre compte.")
-    if existing_domain is None and db.execute(
-        "SELECT 1 FROM domains WHERE substr(?1, -length(name) - 1)='.' || name "
-        "OR substr(name, -length(?1) - 1)='.' || ?1", (domain_name,),
-    ).fetchone():
-        raise ValueError("Ce domaine recouvre une zone déjà gérée par l'instance.")
+    if existing_domain is None:
+        _refuse_nested(db, domain_name)
     copied = snapshot(domain_name, []) if existing_domain is None else []
     if existing_domain is None and not copied:
         raise ValueError("Copie DNS vide : zone non créée.")
@@ -73,6 +78,10 @@ def provision_site(
     try:
         with db:
             if existing_domain is None:
+                # Contrôle refait sous verrou : une vérification web concurrente a pu créer
+                # entre-temps une zone parente ou enfant.
+                db.execute("BEGIN IMMEDIATE")
+                _refuse_nested(db, domain_name)
                 domain_id = db.execute(
                     "INSERT INTO domains(user_id,name,created_at) VALUES(?,?,?)",
                     (user_id, domain_name, now_iso()),

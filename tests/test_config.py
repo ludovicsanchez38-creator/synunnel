@@ -146,6 +146,14 @@ def test_provision_cli_logic_requires_approved_owner_and_preserves_mail(tmp_path
         assert provision_site(app, **kwargs)["copied_records"] == 0
         assert provision_site(app, **{**kwargs, "machine_public_key": None})["copied_records"] == 0
         assert db.execute("SELECT COUNT(*) FROM domains").fetchone()[0] == 1
+        # Une zone parente d'une zone existante est refusée aussi par l'outil d'administration.
+        try:
+            provision_site(app, **{**kwargs, "domain_name": "fr.exemple.fr", "machine_name": "autre",
+                                   "machine_ip": "10.88.0.4"})
+        except ValueError as exc:
+            assert "recouvre" in str(exc)
+        else:
+            raise AssertionError("Zone imbriquée acceptée par le provisionnement.")
 
 
 def test_cli_env_parser_accepts_empty_ipv6(tmp_path):
@@ -176,3 +184,10 @@ def test_machine_config_stream_private_key_is_not_stored(tmp_path):
         assert "AllowedIPs = 10.88.0.1/32" in config
         assert db.execute("SELECT public_key FROM machines").fetchone()[0] == public
         assert private.encode() not in Path(app.config["DATABASE"]).read_bytes()
+
+
+def test_overlap_check_lists_nested_zones():
+    nested_pairs = runpy.run_path(str(ROOT / "scripts/check-overlaps.py"))["nested_pairs"]
+    assert nested_pairs(["exemple.fr", "equipe.exemple.fr", "autre.fr", "xexemple.fr"]) == [
+        ("exemple.fr", "equipe.exemple.fr"),
+    ]

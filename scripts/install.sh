@@ -28,6 +28,13 @@ if [[ -e /etc/synunnel/synunnel.env ]]; then
   source /etc/synunnel/synunnel.env
   set +a
 fi
+for setting in PUBLIC_IPV4 PUBLIC_IPV6 DASHBOARD_HOST NS1_HOST NS2_HOST ACME_EMAIL SOA_RNAME REDIRECT_HOSTS \
+  RESERVED_DOMAINS MAX_DOMAINS_PER_USER MAX_MACHINES_PER_USER; do
+  if [[ "${!setting:-}" == *[$'\n\r']* ]]; then
+    printf '%s ne doit pas contenir de retour à la ligne.\n' "$setting" >&2
+    exit 1
+  fi
+done
 missing=()
 for setting in PUBLIC_IPV4 DASHBOARD_HOST NS1_HOST NS2_HOST ACME_EMAIL; do
   if [[ -z "${!setting:-}" ]]; then missing+=("$setting"); fi
@@ -92,13 +99,16 @@ fi
 parent="$(dirname "$REPO_DIR")"
 while [[ "$parent" != / ]]; do
   if [[ "$(stat -c %A "$parent")" != ?????????[xt] ]]; then
-    if getfacl -cp "$parent" 2>/dev/null | grep -Eq '^(user|group):[^:]+:|^mask::' \
-       && ! getfacl -cp "$parent" | grep -q '^user:synunnel:'; then
+    acl="$(getfacl -cp "$parent" 2>/dev/null)"
+    if grep -q '^user:synunnel:' <<< "$acl"; then
+      : # Entrée posée par une installation précédente : on n'y touche plus.
+    elif grep -Eq '^(user|group):[^:]+:|^mask::' <<< "$acl"; then
       # Ajouter une entrée recalculerait le masque et pourrait rendre des droits à d'autres comptes.
       printf '%s porte déjà des ACL : clone plutôt le dépôt dans /opt/synunnel.\n' "$parent" >&2
       exit 1
+    else
+      setfacl -m u:synunnel:--x "$parent"
     fi
-    setfacl -m u:synunnel:--x "$parent"
   fi
   parent="$(dirname "$parent")"
 done
@@ -228,6 +238,7 @@ systemctl daemon-reload
 systemctl enable --now pdns
 systemctl restart pdns
 "$REPO_DIR/.venv/bin/python" "$REPO_DIR/scripts/migrate-authority.py"
+"$REPO_DIR/.venv/bin/python" "$REPO_DIR/scripts/check-overlaps.py"
 systemctl enable --now synunnel
 systemctl restart synunnel
 for attempt in 1 2 3 4 5; do

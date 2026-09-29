@@ -75,13 +75,15 @@ CREATE TABLE IF NOT EXISTS access_codes (
     user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     hostname TEXT NOT NULL,
     next_path TEXT NOT NULL,
-    expires_at INTEGER NOT NULL
+    expires_at INTEGER NOT NULL,
+    session_version INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS host_sessions (
     token_hash TEXT PRIMARY KEY,
     user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     hostname TEXT NOT NULL,
-    expires_at INTEGER NOT NULL
+    expires_at INTEGER NOT NULL,
+    session_version INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_host_sessions_host ON host_sessions(hostname);
 CREATE TABLE IF NOT EXISTS attempts (
@@ -139,6 +141,7 @@ def init_db() -> None:
         # chargée dans Caddy ne peut pas être réautorisée par une adresse recréée au même nom.
         db.execute("ALTER TABLE addresses ADD COLUMN route_token TEXT")
         db.execute("UPDATE addresses SET route_token=lower(hex(randomblob(12))) WHERE route_token IS NULL")
-    if "session_version" not in {row[1] for row in db.execute("PRAGMA table_info(users)")}:
-        db.execute("ALTER TABLE users ADD COLUMN session_version INTEGER NOT NULL DEFAULT 0")
+    for table in ("users", "access_codes", "host_sessions"):
+        if "session_version" not in {row[1] for row in db.execute(f"PRAGMA table_info({table})")}:
+            db.execute(f"ALTER TABLE {table} ADD COLUMN session_version INTEGER NOT NULL DEFAULT 0")
     db.commit()

@@ -446,3 +446,48 @@ def test_reservation_added_after_claim_blocks_verification(app):
     assert "/claims/" in response.headers["Location"]
     with app.app_context():
         assert get_db().execute("SELECT COUNT(*) FROM domains").fetchone()[0] == 0
+
+
+def test_access_code_from_before_logout_is_refused(app):
+    owner = app.test_client()
+    user_id = register_approve_login(app, owner, "code@example.net")
+    domain_id = add_domain(owner, "code.example.net")
+    with app.app_context():
+        db = get_db()
+        db.execute("INSERT INTO machines(user_id,name,ip,public_key,created_at) VALUES(?,?,?,?,?)",
+                   (user_id, "nas", "10.88.0.9", base64.b64encode(b"z" * 32).decode(), "2026-09-29"))
+        db.commit()
+        machine_id = db.execute("SELECT id FROM machines").fetchone()[0]
+    owner.post("/addresses", data={"csrf_token": csrf(owner), "domain_id": domain_id, "machine_id": machine_id,
+                                   "name": "prive", "port": "80", "protected": "1"})
+    assert owner.post("/logout", data={"csrf_token": csrf(owner)}).status_code == 302
+    # Une requête engagée avant la déconnexion insère son code après elle, avec l'ancienne version.
+    import hashlib
+    with app.app_context():
+        db = get_db()
+        db.execute("INSERT INTO access_codes(code_hash,user_id,hostname,next_path,expires_at,session_version) "
+                   "VALUES(?,?,?,?,?,?)", (hashlib.sha256(b"code-tardif").hexdigest(), user_id,
+                                           "prive.code.example.net", "/", 4102444800, 0))
+        db.commit()
+    browser = app.test_client()
+    response = browser.get("/__synunnel/auth/callback?code=code-tardif", base_url="https://prive.code.example.net")
+    assert response.status_code == 403
+
+
+def test_claim_cancelled_during_verification_is_not_converted(app, monkeypatch):
+    client = app.test_client()
+    register_approve_login(app, client, "annule@example.net")
+    claim_id, proof = claim_domain(client, "annule.example")
+
+    def proof_then_cancel(domain):
+        with app.app_context():
+            db = get_db()
+            db.execute("DELETE FROM domain_claims WHERE id=?", (claim_id,))
+            db.commit()
+        return {proof}
+
+    monkeypatch.setattr("synunnel.web.ownership_proof", proof_then_cancel)
+    response = client.post(f"/claims/{claim_id}/verify", data={"csrf_token": csrf(client)})
+    assert "/domains/" not in response.headers["Location"]
+    with app.app_context():
+        assert get_db().execute("SELECT COUNT(*) FROM domains").fetchone()[0] == 0

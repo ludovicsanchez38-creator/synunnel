@@ -7,14 +7,14 @@
 - Session du tableau de bord en cookie `__Host-`, `Secure`, `HttpOnly`, `SameSite=Lax`, sans domaine partagé ; toutes les actions web portent un jeton CSRF, renouvelé à la connexion.
 - Inscription et connexion limitées par IP et par adresse mail. Les réponses publiques ne révèlent pas si une adresse possède déjà un compte, et la connexion d'un compte inexistant coûte le même calcul qu'une vraie tentative.
 - Un compte neuf reste en attente et n'a accès à rien. Un refus supprime le compte et bloque son adresse.
-- La déconnexion vaut pour tous les appareils : elle invalide les autres sessions du tableau de bord (version de session vérifiée à chaque requête) et ferme les accès ouverts sur les adresses protégées.
+- La déconnexion vaut pour tous les appareils : elle change la version de session du compte, vérifiée à chaque requête du tableau de bord, à l'utilisation d'un code d'accès et à chaque autorisation d'une adresse protégée. Un code émis par une requête engagée avant la déconnexion est donc refusé.
 
 **Domaines**
 - Un domaine n'est créé qu'après une **preuve de propriété** : un TXT `_synunnel.<domaine>` propre à la demande, lu directement chez les serveurs qui font autorité pour la zone (réponse `AA` exigée, repli TCP). Tant que la preuve manque, aucune zone n'existe et le nom reste ouvert à son véritable propriétaire ; la première preuve valide l'emporte et annule les demandes concurrentes.
-- Deux zones ne se recouvrent jamais : un domaine qui contient une zone existante, ou qui est contenu dans l'une d'elles, est refusé, quel que soit le compte.
+- Deux zones ne se recouvrent jamais : un domaine qui contient une zone existante, ou qui est contenu dans l'une d'elles, est refusé, quel que soit le compte, depuis le tableau de bord comme depuis l'outil d'administration (contrôle refait sous verrou d'écriture). À la mise à niveau, l'installateur signale les zones imbriquées qu'une ancienne base contiendrait, sans rien supprimer.
 - Les noms de l'instance (tableau de bord, serveurs de noms, redirections) et ceux de `RESERVED_DOMAINS` ne peuvent pas être revendiqués, ni rien de ce qu'ils contiennent ; leurs domaines parents sont réservés au nom exact. Une réservation ajoutée après coup s'applique aussi aux demandes en cours.
 - Un CNAME ne partage jamais son nom ; une adresse ne peut écraser un A, AAAA ou CNAME existant ; la longueur des noms complets est contrôlée.
-- Quotas de domaines et de machines par compte, comptés sous verrou d'écriture.
+- Quotas de domaines et de machines par compte, comptés sous verrou d'écriture ; une demande annulée pendant sa vérification n'est pas convertie.
 
 **Isolation entre comptes**
 - Domaines, enregistrements, machines, adresses et listes d'invités sont filtrés par propriétaire ; les tests essaient explicitement des lectures et modifications croisées entre deux comptes.
@@ -46,7 +46,7 @@
 - **Comptes.** Pas de réinitialisation de mot de passe, pas de double authentification, pas de vérification de la boîte mail : l'administrateur valide chaque compte à la main.
 - **Sauvegardes.** Aucune rotation ni restauration automatisée n'est fournie (voir le README).
 - **Docker sur le même VPS.** Docker insère ses propres règles de pare-feu et peut contourner UFW pour les ports qu'il publie. La table `synunnel_wg` reste active pour le tunnel.
-- **Droits sur le dépôt.** L'installateur ouvre la traversée des répertoires parents du dépôt à l'utilisateur `synunnel` ; il refuse de toucher un répertoire qui porte déjà des ACL. Cloner dans `/opt/synunnel` évite toute modification de droits.
+- **Droits sur le dépôt.** L'installateur ouvre la traversée des répertoires parents du dépôt à l'utilisateur `synunnel` quand ils ne sont pas déjà traversables par tous. Il refuse un répertoire qui porte d'autres ACL étendues, et ne retouche jamais une entrée `synunnel` posée par une installation précédente. Cloner dans `/opt/synunnel` évite toute modification de droits.
 - **Dépendances.** L'installation résout les versions compatibles au moment où elle est lancée ; `uv.lock` fige les versions testées pour le développement.
 - **Échelle.** SQLite et une seule instance applicative suffisent à un usage personnel, pas à une plateforme ouverte au public.
 

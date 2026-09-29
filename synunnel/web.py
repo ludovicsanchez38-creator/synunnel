@@ -182,9 +182,12 @@ def _redirect_after_login(next_url: str, user_id: int):
     hostname, path = target
     code = secrets.token_urlsafe(32)
     db = get_db()
+    # Le code porte la version de session qui l'a émis : une déconnexion survenue pendant
+    # cette requête le rend inutilisable, même s'il est inséré après elle.
     db.execute(
-        "INSERT INTO access_codes(code_hash,user_id,hostname,next_path,expires_at) VALUES(?,?,?,?,?)",
-        (_hash_token(code), user_id, hostname, path, int(time.time()) + 120),
+        "INSERT INTO access_codes(code_hash,user_id,hostname,next_path,expires_at,session_version) "
+        "VALUES(?,?,?,?,?,?)",
+        (_hash_token(code), user_id, hostname, path, int(time.time()) + 120, session.get("sv", -1)),
     )
     db.commit()
     return redirect(f"https://{hostname}/__synunnel/auth/callback?code={quote(code)}")
@@ -452,6 +455,14 @@ def create_app(config_override: dict | None = None) -> Flask:
             try:
                 with db:
                     db.execute("BEGIN IMMEDIATE")
+                    if not db.execute(
+                        "SELECT 1 FROM domain_claims WHERE id=? AND user_id=? AND name=? AND token=?",
+                        (claim_id, g.user["id"], domain, claim["token"]),
+                    ).fetchone():
+                        raise ValueError("Cette demande a été annulée entre-temps.")
+                    owned = db.execute("SELECT COUNT(*) FROM domains WHERE user_id=?", (g.user["id"],)).fetchone()[0]
+                    if owned >= app.config["MAX_DOMAINS_PER_USER"]:
+                        raise ValueError("Nombre maximal de domaines atteint pour ce compte.")
                     _refuse_overlap(db, domain)
                     domain_id = db.execute(
                         "INSERT INTO domains(user_id,name,created_at) VALUES(?,?,?)",
@@ -773,7 +784,9 @@ def create_app(config_override: dict | None = None) -> Flask:
         token = request.cookies.get(ACCESS_COOKIE, "")
         if token:
             found = get_db().execute(
-                "SELECT user_id FROM host_sessions WHERE token_hash=? AND hostname=? AND expires_at>?",
+                "SELECT s.user_id FROM host_sessions s JOIN users u ON u.id=s.user_id "
+                "AND u.session_version=s.session_version "
+                "WHERE s.token_hash=? AND s.hostname=? AND s.expires_at>?",
                 (_hash_token(token), hostname, int(time.time())),
             ).fetchone()
             if found and _authorized_protected_user(hostname, found["user_id"]):
@@ -792,8 +805,8 @@ def create_app(config_override: dict | None = None) -> Flask:
             abort(403)
         db = get_db()
         row = db.execute(
-            "SELECT c.user_id,c.hostname,c.next_path FROM access_codes c "
-            "JOIN users u ON u.id=c.user_id AND u.status='approved' "
+            "SELECT c.user_id,c.hostname,c.next_path,c.session_version FROM access_codes c "
+            "JOIN users u ON u.id=c.user_id AND u.status='approved' AND u.session_version=c.session_version "
             "WHERE c.code_hash=? AND c.hostname=? AND c.expires_at>?",
             (_hash_token(code), hostname, int(time.time())),
         ).fetchone()
@@ -805,8 +818,9 @@ def create_app(config_override: dict | None = None) -> Flask:
             if deleted.rowcount != 1:
                 abort(403)
             db.execute(
-                "INSERT INTO host_sessions(token_hash,user_id,hostname,expires_at) VALUES(?,?,?,?)",
-                (_hash_token(token), row["user_id"], hostname, int(time.time()) + 43200),
+                "INSERT INTO host_sessions(token_hash,user_id,hostname,expires_at,session_version) "
+                "VALUES(?,?,?,?,?)",
+                (_hash_token(token), row["user_id"], hostname, int(time.time()) + 43200, row["session_version"]),
             )
         response = redirect(row["next_path"])
         response.set_cookie(ACCESS_COOKIE, token, secure=True, httponly=True, samesite="Lax", max_age=43200, path="/")
