@@ -266,11 +266,12 @@ if [[ -n "$SMTP_PASSWORD_FILE" ]]; then
 fi
 # Mentions légales et notice de confidentialité : lisibles par le service, modifiables par root seul.
 # Absentes, les deux pages publiques le disent : l'exploitant doit les publier avant d'ouvrir l'instance.
-for identity_setting in OPERATOR_NAME ADMIN_CONTACT; do
-  if [[ -z "${!identity_setting}" ]]; then
-    printf "Avertissement : %s non renseigné, le pied de page et le mail des invités ne nomment pas l'exploitant.\n" "$identity_setting" >&2
-  fi
-done
+if [[ -z "$OPERATOR_NAME" ]]; then
+  printf "Avertissement : OPERATOR_NAME non renseigné, le pied de page et le mail des invités ne nomment pas l'exploitant.\n" >&2
+fi
+if [[ -z "$ADMIN_CONTACT" ]]; then
+  printf "Avertissement : ADMIN_CONTACT non renseigné, le mail des invités ne donne aucune adresse pour sortir d'une liste.\n" >&2
+fi
 for file_setting in LEGAL_FILE PRIVACY_FILE; do
   legal_path="${!file_setting}"
   if [[ -z "$legal_path" ]]; then
