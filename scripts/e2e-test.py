@@ -491,15 +491,16 @@ def main() -> None:
             raise AssertionError(f"Le cookie de l'invité reste valable après sa sortie ({after}).")
         print("Sortie de l'invité par /__synunnel/logout, cookie rejoué refusé : OK")
 
-        # Les chemins réservés ne mènent jamais à l'application par une traversée.
-        for sneaky in ("/__synunnel/../dashboard", "/__synunnel/%2e%2e/api/v1/me", "/__synunnel/..%2fapi/v1/me"):
-            reply = run(*base, "--path-as-is", "--resolve", f"{PROTECTED}:443:{values['PUBLIC_IPV4']}",
-                        "--header", f"Authorization: Bearer {api_token}", "--write-out", "\\n%{http_code}",
-                        f"https://{PROTECTED}{sneaky}", check=False).stdout
-            # Seules réponses admises : la redirection de forward_auth ou un 404 générique, jamais une page
-            # de l'application (toutes portent « Synunnel ») ni une réponse de l'API.
-            if EMAIL in reply or reply.rstrip().endswith("\n200") or "Synunnel" in reply:
-                raise AssertionError(f"Traversée de /__synunnel/ vers l'application : {sneaky}")
+        # Les chemins réservés ne mènent jamais à l'application par une traversée : ni page du tableau de
+        # bord (titre « · Synunnel »), ni réponse de l'API, ni 200.
+        for sneaky in ("/__synunnel/../dashboard", "/__synunnel/../login", "/__synunnel/%2e%2e/api/v1/me",
+                       "/__synunnel/..%2fapi/v1/me"):
+            for extra in ([], ["--header", f"Authorization: Bearer {api_token}"]):
+                reply = run(*base, "--path-as-is", "--resolve", f"{PROTECTED}:443:{values['PUBLIC_IPV4']}", *extra,
+                            "--write-out", "\\n%{http_code}", f"https://{PROTECTED}{sneaky}", check=False).stdout
+                if EMAIL in reply or reply.rstrip().endswith("\n200") or "· Synunnel</title>" in reply:
+                    raise AssertionError(f"Traversée de /__synunnel/ vers l'application : {sneaky} -> "
+                                         f"{reply[-400:]!r}")
         print("Traversées de /__synunnel/ refusées : OK")
 
         # Mot de passe oublié par mail, de bout en bout, et journal de Caddy expurgé sur un 502.
