@@ -16,8 +16,8 @@ from .dns import PowerDNS, fqdn, normalize_domain, relative_name, snapshot_recor
 
 def _refuse_nested(db, domain_name: str) -> None:
     if db.execute(
-        "SELECT 1 FROM domains WHERE substr(?1, -length(name) - 1)='.' || name "
-        "OR substr(name, -length(?1) - 1)='.' || ?1", (domain_name,),
+        "SELECT 1 FROM domains WHERE substr(?, -length(name) - 1)='.' || name "
+        "OR substr(name, -length(?) - 1)='.' || ?", (domain_name, domain_name, domain_name),
     ).fetchone():
         raise ValueError("Ce domaine recouvre une zone déjà gérée par l'instance.")
 

@@ -108,9 +108,9 @@ def _owned_machine(machine_id: int):
 def _refuse_overlap(db, domain: str) -> None:
     """Refuse un domaine qui contient une zone existante ou qui est contenu dans l'une d'elles."""
     row = db.execute(
-        "SELECT name FROM domains WHERE name=?1 OR substr(?1, -length(name) - 1)='.' || name "
-        "OR substr(name, -length(?1) - 1)='.' || ?1 LIMIT 1",
-        (domain,),
+        "SELECT name FROM domains WHERE name=? OR substr(?, -length(name) - 1)='.' || name "
+        "OR substr(name, -length(?) - 1)='.' || ? LIMIT 1",
+        (domain, domain, domain, domain),
     ).fetchone()
     if row is not None:
         if row["name"] == domain:
