@@ -9,7 +9,7 @@
       <li><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#2451FF" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>Un tunnel WireGuard par machine, aucun port entrant</li>
       <li><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#2451FF" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>Adresses publiques ou réservées à des comptes choisis</li>
     </ul>
-    <p class="muted">Les nouveaux comptes sont vérifiés par l'administrateur avant tout accès.</p></div>
+    <p class="muted">{% if invitation_mode %}Accès sur invitation : l'administrateur te remet un code lié à ton adresse mail.{% else %}Les nouveaux comptes sont vérifiés par l'administrateur avant tout accès.{% endif %}</p></div>
   <div class="card auth-card"><h2>Connexion</h2><p class="muted">Retrouvez vos domaines, machines et adresses.</p>
     <form method="post" action="{{ url_for('login') }}">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}"><input type="hidden" name="next" value="{{ next_url }}">
@@ -17,7 +17,7 @@
       <label>Mot de passe<input type="password" name="password" autocomplete="current-password" required></label>
       <button class="button" type="submit">Se connecter</button>
     </form>
-    <p class="small">Pas encore de compte ? <a href="{{ url_for('register') }}">Demander un accès</a></p>
+    <p class="small">Pas encore de compte ? <a href="{{ url_for('register') }}">{% if invitation_mode %}J'ai un code d'invitation{% else %}Demander un accès{% endif %}</a></p>
   </div>
 </section>
 {% endblock %}

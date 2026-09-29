@@ -217,7 +217,8 @@ def create_app(config_override: dict | None = None) -> Flask:
     def context():
         if "csrf" not in session:
             session["csrf"] = secrets.token_urlsafe(32)
-        return {"csrf_token": session["csrf"], "current_user": g.get("user"), "app_version": VERSION_LABEL}
+        return {"csrf_token": session["csrf"], "current_user": g.get("user"), "app_version": VERSION_LABEL,
+                "invitation_mode": app.config["REGISTRATION_MODE"] != "approval"}
 
     @app.after_request
     def security_headers(response):

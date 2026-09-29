@@ -499,3 +499,17 @@ def test_claim_cancelled_during_verification_is_not_converted(app, monkeypatch):
     assert "/domains/" not in response.headers["Location"]
     with app.app_context():
         assert get_db().execute("SELECT COUNT(*) FROM domains").fetchone()[0] == 0
+
+
+def test_login_texts_follow_registration_mode(app):
+    client = app.test_client()
+    # Mode approbation : inscription libre puis validation par l'administrateur.
+    page = client.get("/login").get_data(as_text=True)
+    assert "Les nouveaux comptes sont vérifiés par l'administrateur avant tout accès." in page
+    assert "Demander un accès" in page and "J'ai un code d'invitation" not in page
+    # Mode invitation : aucun texte ne promet une demande d'accès.
+    app.config["REGISTRATION_MODE"] = "invitation"
+    page = client.get("/login").get_data(as_text=True)
+    assert "Accès sur invitation : l'administrateur te remet un code lié à ton adresse mail." in page
+    assert "J'ai un code d'invitation" in page
+    assert "Demander un accès" not in page and "vérifiés par l'administrateur" not in page
