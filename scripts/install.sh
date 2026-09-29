@@ -324,15 +324,15 @@ chmod 0640 /etc/powerdns/pdns.d/synunnel.conf
 
 # Dépendances figées : versions et empreintes de requirements.lock (généré depuis uv.lock par
 # `uv export --frozen --no-dev --no-emit-project`), paquets binaires seulement, sans outils de
-# développement ni installation éditable. L'environnement neuf est construit et vérifié à côté de
-# l'ancien, qui continue de servir ; la bascule n'a lieu qu'une fois Caddy validé et les unités écrites.
-VENV_NEW="$REPO_DIR/.venv.new"
+# développement ni installation éditable. Chaque environnement est construit dans son propre répertoire
+# .venvs/<horodatage> et n'en bouge plus (ses scripts restent valides) ; .venv n'est qu'un lien symbolique,
+# basculé une fois Caddy validé et les unités chargées, et rendu au précédent si le service ne répond pas.
+VENV_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$"
+VENV_NEW="$REPO_DIR/.venvs/$VENV_ID"
+install -d -m 0755 "$REPO_DIR/.venvs"
 (
   # L'environnement Python doit rester lisible par le service et par les tests.
   umask 022
-  if [[ -e "$VENV_NEW" ]]; then
-    python3 -c 'import shutil, sys; shutil.rmtree(sys.argv[1])' "$VENV_NEW"
-  fi
   python3 -m venv "$VENV_NEW"
   "$VENV_NEW/bin/python" -m pip install --quiet --disable-pip-version-check --no-input \
     --require-hashes --only-binary=:all: --no-deps -r "$REPO_DIR/requirements.lock"
@@ -340,29 +340,47 @@ VENV_NEW="$REPO_DIR/.venv.new"
   PURELIB="$("$VENV_NEW/bin/python" -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"
   printf '%s\n' "$REPO_DIR" > "$PURELIB/synunnel-repo.pth"
   (cd / && "$VENV_NEW/bin/python" -c 'import synunnel, cryptography, gunicorn') >/dev/null
+  (cd / && "$VENV_NEW/bin/python" -m gunicorn --version) >/dev/null
 )
 
-# Bascule de l'environnement : l'ancien devient .venv.prev (gardé pour un retour rapide), le neuf .venv.
-# Si le second renommage échoue, l'ancien est remis en place. Renommé, l'environnement garde un
-# interpréteur valide (lien vers celui du système) mais ses scripts de console pointent encore vers
-# .venv.new : les services passent donc par `python -m`.
+# --- bascule de l'environnement : début
+# .venv pointe sur le nouvel environnement par un seul renommage atomique d'un lien. Une installation plus
+# ancienne avait un vrai répertoire .venv : il est d'abord rangé dans .venvs/ ; un signal reçu, ou un échec,
+# avant la pose du lien le remet en place. VENV_PREVIOUS désigne l'environnement d'avant, pour un retour.
+VENV_PREVIOUS=""
+restore_legacy_venv() {
+  local repo="$1" legacy="$2"
+  if [[ -n "$legacy" && -d "$repo/$legacy" && ! -e "$repo/.venv" && ! -L "$repo/.venv" ]]; then
+    mv "$repo/$legacy" "$repo/.venv"
+  fi
+}
 swap_venv() {
-  local repo="$1"
-  if [[ -e "$repo/.venv.prev" ]]; then
-    python3 -c 'import shutil, sys; shutil.rmtree(sys.argv[1])' "$repo/.venv.prev"
+  local repo="$1" target="$2" legacy=""
+  if [[ -L "$repo/.venv" ]]; then
+    VENV_PREVIOUS="$(readlink "$repo/.venv")"
+  elif [[ -d "$repo/.venv" ]]; then
+    legacy=".venvs/ancien-$(date -u +%Y%m%dT%H%M%SZ)-$$"
+    trap 'restore_legacy_venv "'"$repo"'" "'"$legacy"'"; exit 1' INT TERM HUP
+    mv "$repo/.venv" "$repo/$legacy"
+    VENV_PREVIOUS="$legacy"
   fi
-  if [[ -e "$repo/.venv" ]]; then
-    mv "$repo/.venv" "$repo/.venv.prev"
-  fi
-  if ! mv "$repo/.venv.new" "$repo/.venv"; then
-    if [[ -e "$repo/.venv.prev" && ! -e "$repo/.venv" ]]; then
-      mv "$repo/.venv.prev" "$repo/.venv"
-    fi
+  if ! ln -sfn "$target" "$repo/.venv.lien" || ! mv -Tf "$repo/.venv.lien" "$repo/.venv"; then
+    restore_legacy_venv "$repo" "$legacy"
+    trap - INT TERM HUP
     printf "Bascule de l'environnement Python impossible : l'ancien est remis en place.\n" >&2
     return 1
   fi
-  (cd / && "$repo/.venv/bin/python" -m gunicorn --version) >/dev/null
+  trap - INT TERM HUP
 }
+rollback_venv() {
+  local repo="$1" previous="$2" path
+  path="$repo/$previous"
+  if [[ "$previous" == /* ]]; then path="$previous"; fi
+  if [[ -n "$previous" && -d "$path" ]]; then
+    ln -sfn "$previous" "$repo/.venv.lien" && mv -Tf "$repo/.venv.lien" "$repo/.venv"
+  fi
+}
+# --- bascule de l'environnement : fin
 
 install -o root -g root -m 0755 "$REPO_DIR/scripts/synunnel-sync.py" /usr/local/sbin/synunnel-sync
 cat > /etc/sudoers.d/synunnel <<'EOF'
@@ -388,6 +406,14 @@ if ! cmp -s "$CADDY_CANDIDATE" /etc/caddy/Caddyfile; then
   install -o root -g root -m 0644 "$CADDY_CANDIDATE" /etc/caddy/Caddyfile
 fi
 python3 -c 'import pathlib,sys; pathlib.Path(sys.argv[1]).unlink()' "$CADDY_CANDIDATE"
+# Unités en place gardées de côté (dans /run, effacé au redémarrage) : si le service ne répond pas après la
+# bascule, elles reviennent avec l'environnement précédent.
+UNITS_PREVIOUS="$(mktemp -d /run/synunnel-unites.XXXXXX)"
+for unit in synunnel.service synunnel-reconcile.service synunnel-reconcile.timer; do
+  if [[ -e "/etc/systemd/system/$unit" ]]; then
+    cp -p "/etc/systemd/system/$unit" "$UNITS_PREVIOUS/$unit"
+  fi
+done
 for unit in synunnel.service synunnel-reconcile.service synunnel-reconcile.timer; do
   sed "s#@REPO_DIR@#$REPO_DIR#g" "$REPO_DIR/config/$unit" > "/etc/systemd/system/$unit"
   chmod 0644 "/etc/systemd/system/$unit"
@@ -407,7 +433,8 @@ fi
 # avec le nouvel environnement) : la bascule peut avoir lieu, aucune unité chargée ne dépend plus des
 # scripts de console de l'environnement.
 systemctl daemon-reload
-swap_venv "$REPO_DIR"
+swap_venv "$REPO_DIR" ".venvs/$VENV_ID"
+(cd / && "$REPO_DIR/.venv/bin/python" -m gunicorn --version) >/dev/null
 # Redémarrage complet : l'API d'administration de Caddy change de place (socket réservé à Caddy),
 # un simple rechargement ne la déplacerait pas.
 systemctl enable caddy
@@ -419,11 +446,39 @@ systemctl restart pdns
 systemctl enable --now synunnel
 systemctl enable --now synunnel-reconcile.timer
 systemctl restart synunnel
-for attempt in 1 2 3 4 5; do
-  if curl --silent --fail http://127.0.0.1:8000/login >/dev/null; then break; fi
-  sleep 1
-done
-curl --silent --fail http://127.0.0.1:8000/login >/dev/null
+service_healthy() {
+  for attempt in 1 2 3 4 5 6 7 8 9 10; do
+    if curl --silent --fail --max-time 5 http://127.0.0.1:8000/login >/dev/null; then return 0; fi
+    sleep 1
+  done
+  return 1
+}
+if ! service_healthy; then
+  # Retour à l'environnement et aux unités d'avant ; le code du dépôt, lui, reste celui qui est extrait.
+  printf "Le service ne répond pas avec le nouvel environnement : retour à l'environnement et aux unités précédents.\n" >&2
+  rollback_venv "$REPO_DIR" "$VENV_PREVIOUS"
+  for unit in synunnel.service synunnel-reconcile.service synunnel-reconcile.timer; do
+    if [[ -e "$UNITS_PREVIOUS/$unit" ]]; then
+      install -o root -g root -m 0644 "$UNITS_PREVIOUS/$unit" "/etc/systemd/system/$unit"
+    fi
+  done
+  systemctl daemon-reload
+  systemctl restart synunnel || true
+  printf 'Voir journalctl -u synunnel ; pour revenir au code précédent : git checkout, puis relancer ce script.\n' >&2
+  exit 1
+fi
+# Service sain : on ne garde que l'environnement courant et le précédent (retour rapide).
+python3 - "$REPO_DIR" ".venvs/$VENV_ID" "$VENV_PREVIOUS" <<'PY'
+import shutil, sys
+from pathlib import Path
+repo, keep = Path(sys.argv[1]), {item for item in sys.argv[2:] if item}
+for old in (repo / ".venvs").iterdir():
+    if old.is_dir() and not old.is_symlink() and f".venvs/{old.name}" not in keep:
+        shutil.rmtree(old)
+for legacy in (".venv.new", ".venv.prev"):
+    if (repo / legacy).is_dir() and not (repo / legacy).is_symlink():
+        shutil.rmtree(repo / legacy)
+PY
 /usr/local/sbin/synunnel-sync
 # Le tunnel doit revenir seul après un redémarrage du VPS.
 systemctl enable wg-quick@wg0

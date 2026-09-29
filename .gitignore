@@ -12,3 +12,5 @@ __pycache__/
 coverage.xml
 .venv.new/
 .venv.prev/
+.venvs/
+.venv.lien

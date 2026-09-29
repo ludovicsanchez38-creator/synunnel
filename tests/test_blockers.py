@@ -195,8 +195,8 @@ def test_api_refuses_to_delete_a_delegated_domain(app, monkeypatch):
 
 
 def test_services_start_through_the_venv_interpreter_not_a_console_script():
-    """L'environnement est construit dans .venv.new puis renommé : les scripts de console gardent l'ancien
-    chemin dans leur ligne #!, seul l'interpréteur (lien vers celui du système) survit au renommage."""
+    """Les services passent par l'interpréteur de l'environnement (`python -m gunicorn`), jamais par un
+    script de console : une ancienne installation renommait son environnement, ce qui cassait ces scripts."""
     from pathlib import Path
 
     root = Path(__file__).resolve().parent.parent
@@ -205,7 +205,7 @@ def test_services_start_through_the_venv_interpreter_not_a_console_script():
             if line.startswith("ExecStart="):
                 assert line.startswith("ExecStart=@REPO_DIR@/.venv/bin/python "), (unit.name, line)
     installer = (root / "scripts" / "install.sh").read_text()
-    assert '"$repo/.venv/bin/python" -m gunicorn --version' in installer
+    assert '"$REPO_DIR/.venv/bin/python" -m gunicorn --version' in installer
 
 
 def _installer() -> str:
@@ -226,23 +226,73 @@ def test_environment_is_swapped_only_once_caddy_and_units_are_ready():
     # Unités chargées avant la bascule : un arrêt entre les deux laisse systemd sur `python -m gunicorn`,
     # jamais sur l'ancien `.venv/bin/gunicorn` face à un environnement dont les scripts pointent ailleurs.
     assert build < validate < units < reload < swap
-    assert 'mv "$VENV_NEW" "$REPO_DIR/.venv"' not in script[:swap]
+    assert 'VENV_NEW="$REPO_DIR/.venvs/' in script and 'mv "$VENV_NEW"' not in script
 
 
-def test_failed_swap_puts_the_previous_environment_back(tmp_path):
+def _venv_functions() -> str:
+    """Fonctions de bascule de l'installateur, extraites telles quelles pour être jouées sur un faux dépôt."""
+    script = _installer()
+    start = script.index("# --- bascule de l'environnement : début")
+    return script[start:script.index("# --- bascule de l'environnement : fin")]
+
+
+def _bash(tmp_path, code: str, path_dir=None):
+    import os
     import subprocess
 
-    script = _installer()
-    function = "swap_venv() {" + script.split("swap_venv() {", 1)[1].split("\n}\n", 1)[0] + "\n}\n"
+    env = {"PATH": (f"{path_dir}:" if path_dir else "") + os.environ["PATH"]}
+    return subprocess.run(["bash", "-c", _venv_functions() + code], capture_output=True, text=True, check=False,
+                          env=env, cwd=tmp_path)
+
+
+def _legacy_repo(tmp_path):
     repo = tmp_path / "depot"
     (repo / ".venv").mkdir(parents=True)
     (repo / ".venv" / "ancien").write_text("x")
-    # Pas de .venv.new : le second renommage échoue, l'ancien environnement doit revenir.
-    run = subprocess.run(["bash", "-c", function + f'swap_venv "{repo}"'], capture_output=True, text=True,
-                         check=False)
-    assert run.returncode != 0
-    assert (repo / ".venv" / "ancien").exists() and not (repo / ".venv.prev").exists()
+    (repo / ".venvs" / "neuf").mkdir(parents=True)
+    (repo / ".venvs" / "neuf" / "neuf").write_text("x")
+    return repo
 
+
+def test_versioned_environment_is_switched_by_an_atomic_link(tmp_path):
+    """Constat 5 (résidu) : chaque environnement garde son chemin, .venv n'est qu'un lien basculé d'un seul
+    renommage ; l'ancien répertoire .venv d'une installation précédente est rangé et reste désigné."""
+    repo = _legacy_repo(tmp_path)
+    run = _bash(tmp_path, f'swap_venv "{repo}" ".venvs/neuf" && printf "%s" "$VENV_PREVIOUS"')
+    assert run.returncode == 0, run.stderr
+    assert (repo / ".venv").is_symlink() and (repo / ".venv" / "neuf").exists()
+    previous = run.stdout
+    assert previous.startswith(".venvs/ancien-") and (repo / previous / "ancien").exists()
+    (repo / ".venvs" / "suivant").mkdir()
+    run = _bash(tmp_path, f'swap_venv "{repo}" ".venvs/suivant" && printf "%s" "$VENV_PREVIOUS"')
+    assert run.returncode == 0 and run.stdout == ".venvs/neuf" and (repo / ".venv").resolve().name == "suivant"
+    run = _bash(tmp_path, f'rollback_venv "{repo}" ".venvs/neuf"')
+    assert run.returncode == 0 and (repo / ".venv").resolve().name == "neuf"
+
+
+def test_interrupted_or_failed_switch_puts_the_previous_environment_back(tmp_path):
+    repo = _legacy_repo(tmp_path)
+    shims = tmp_path / "shims"
+    shims.mkdir()
+    # Signal reçu entre le rangement de l'ancien répertoire et la pose du lien.
+    (shims / "ln").write_text("#!/bin/sh\nkill -TERM $PPID\nsleep 0.2\nexit 1\n")
+    (shims / "ln").chmod(0o755)
+    run = _bash(tmp_path, f'swap_venv "{repo}" ".venvs/neuf"', path_dir=shims)
+    assert run.returncode != 0
+    assert (repo / ".venv").is_dir() and not (repo / ".venv").is_symlink() and (repo / ".venv" / "ancien").exists()
+    # Échec simple de la pose du lien.
+    (shims / "ln").write_text("#!/bin/sh\nexit 1\n")
+    run = _bash(tmp_path, f'swap_venv "{repo}" ".venvs/neuf"', path_dir=shims)
+    assert run.returncode != 0 and (repo / ".venv" / "ancien").exists()
+
+
+def test_failed_health_check_restores_the_previous_environment_and_units():
+    script = _installer()
+    health = script[script.index("if ! service_healthy; then"):]
+    health = health[:health.index("\nfi\n")]
+    assert 'rollback_venv "$REPO_DIR" "$VENV_PREVIOUS"' in health
+    assert "$UNITS_PREVIOUS" in health and "systemctl daemon-reload" in health and "exit 1" in health
+    assert script.index('UNITS_PREVIOUS="$(mktemp -d') < script.index('> "/etc/systemd/system/$unit"')
 
 def test_admin_api_requires_a_loopback_peer_and_no_proxy_header_even_empty(app):
     """Constat 9 de la revue Codex : la garde reposait sur la valeur des en-têtes, pas sur l'origine."""
