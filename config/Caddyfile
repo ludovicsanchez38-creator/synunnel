@@ -1,5 +1,8 @@
 # Synunnel managed. Généré depuis la configuration par scripts/install.sh.
 {
+    # API d'administration sur un socket dans /run/caddy (0750, propriétaire caddy) : l'utilisateur
+    # de l'application ne peut pas reconfigurer Caddy, seul root y passe via systemctl reload.
+    admin unix//run/caddy/admin.sock
     email __ACME_EMAIL__
     on_demand_tls {
         ask http://127.0.0.1:8000/internal/caddy/ask

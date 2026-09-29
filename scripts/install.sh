@@ -243,8 +243,14 @@ for unit in synunnel.service synunnel-reconcile.service synunnel-reconcile.timer
   chmod 0644 "/etc/systemd/system/$unit"
 done
 install -o root -g root -m 0644 "$REPO_DIR/config/wg0-firewall.nft" /etc/synunnel/wg0-firewall.nft
+install -d -o root -g root -m 0755 /etc/systemd/system/caddy.service.d
+install -o root -g root -m 0644 "$REPO_DIR/config/caddy-synunnel.conf" /etc/systemd/system/caddy.service.d/synunnel.conf
 
 systemctl daemon-reload
+# Redémarrage complet : l'API d'administration de Caddy change de place (socket réservé à Caddy),
+# un simple rechargement ne la déplacerait pas.
+systemctl enable caddy
+systemctl restart caddy
 systemctl enable --now pdns
 systemctl restart pdns
 "$REPO_DIR/.venv/bin/python" "$REPO_DIR/scripts/migrate-authority.py"
@@ -267,7 +273,6 @@ if ip link show wg0 >/dev/null 2>&1 && ! nft -f /etc/synunnel/wg0-firewall.nft; 
   exit 1
 fi
 caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
-systemctl enable --now caddy
 systemctl reload caddy
 
 # Ports publics nécessaires. UFW n'est pas activé par ce script : l'activer sans connaître

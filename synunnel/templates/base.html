@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block title %}Synunnel{% endblock %} · Synunnel</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='site.css') }}">
+  {% block head %}{% endblock %}
 </head>
 <body>
   <div class="topbar-wrap">

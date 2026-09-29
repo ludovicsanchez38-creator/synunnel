@@ -3,7 +3,6 @@
 import hashlib
 import hmac
 import os
-import re
 import secrets
 import sqlite3
 import time
@@ -18,6 +17,7 @@ from flask import (
     flash,
     g,
     jsonify,
+    make_response,
     redirect,
     render_template,
     request,
@@ -34,7 +34,8 @@ from .dns import (
 )
 
 PASSWORDS = PasswordHasher()
-EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
+EMAIL_RE = actions.EMAIL_RE
+SESSION_MAX_AGE = 86400
 ACCESS_COOKIE = "__Host-synunnel-access"
 # Vérifié quand le compte n'existe pas : même coût qu'une vraie tentative.
 DUMMY_HASH = PASSWORDS.hash(secrets.token_hex(16))
@@ -47,9 +48,15 @@ def _hash_token(value: str) -> str:
 
 
 def _client_ip() -> str:
-    if request.remote_addr in {"127.0.0.1", "::1"}:
-        return request.headers.get("X-Real-IP", request.remote_addr)
-    return request.remote_addr or "unknown"
+    raw = request.remote_addr
+    if raw in {"127.0.0.1", "::1"}:
+        raw = request.headers.get("X-Real-IP", raw)
+    return actions.client_bucket(raw)
+
+
+def _same_secret(expected: str, supplied: str) -> bool:
+    # Comparaison en octets : une valeur non ASCII est un refus, jamais une erreur interne.
+    return bool(expected) and hmac.compare_digest(expected.encode(), supplied.encode())
 
 
 def _rate_limit(kind: str, key: str, limit: int, window: int) -> None:
@@ -114,7 +121,14 @@ def _redirect_after_login(next_url: str, user_id: int):
         (_hash_token(code), user_id, hostname, path, int(time.time()) + 120, session.get("sv", -1)),
     )
     db.commit()
-    return redirect(f"https://{hostname}/__synunnel/auth/callback?code={quote(code)}")
+    target = f"https://{hostname}/__synunnel/auth/callback?code={quote(code)}"
+    if request.method == "POST":
+        # Après un envoi de formulaire, la CSP (form-action 'self') interdit à Chromium de suivre une
+        # redirection vers un autre domaine : une page du tableau de bord prend le relais.
+        response = make_response(render_template("continue.html", target=target, hostname=hostname))
+        response.headers["Cache-Control"] = "no-store"
+        return response
+    return redirect(target)
 
 
 class SessionInterface(SecureCookieSessionInterface):
@@ -188,13 +202,14 @@ def create_app(config_override: dict | None = None) -> Flask:
                 "SELECT id,email,status FROM users WHERE id=? AND status='approved' AND session_version=?",
                 (session["user_id"], session.get("sv", -1)),
             ).fetchone()
+            if g.user is not None and int(time.time()) - session.get("auth_at", 0) > SESSION_MAX_AGE:
+                # Durée absolue : même utilisée sans interruption, une session se renouvelle par un mot de passe.
+                g.user = None
             if g.user is None:
                 session.clear()
-        if request.method in {"POST", "PUT", "PATCH", "DELETE"} and not request.path.startswith("/admin/api/"):
-            expected = session.get("csrf", "")
-            supplied = request.form.get("csrf_token", "")
-            if not expected or not hmac.compare_digest(expected, supplied):
-                abort(400, "Jeton CSRF manquant ou invalide.")
+        mutating = request.method in {"POST", "PUT", "PATCH", "DELETE"} and not request.path.startswith("/admin/api/")
+        if mutating and not _same_secret(session.get("csrf", ""), request.form.get("csrf_token", "")):
+            abort(400, "Jeton CSRF manquant ou invalide.")
 
     @app.context_processor
     def context():
@@ -248,8 +263,10 @@ def create_app(config_override: dict | None = None) -> Flask:
             try:
                 with db:
                     db.execute(
-                        "INSERT INTO users(email,password_hash,status,created_at) VALUES(?,?,'pending',?)",
-                        (email, password_hash, now_iso()),
+                        "INSERT INTO users(email,password_hash,status,created_at,session_version) "
+                        "VALUES(?,?,'pending',?,?)",
+                        # Version tirée au hasard : un identifiant réattribué n'hérite d'aucune session.
+                        (email, password_hash, now_iso(), secrets.randbits(62)),
                     )
             except sqlite3.IntegrityError:
                 pass
@@ -263,9 +280,13 @@ def create_app(config_override: dict | None = None) -> Flask:
             if g.user:
                 return _redirect_after_login(next_url, g.user["id"])
             return render_template("login.html", next_url=next_url)
-        email = request.form.get("email", "").strip().lower()
-        _rate_limit("login_ip", _client_ip(), 10, 900)
-        _rate_limit("login_email", email, 10, 900)
+        email = request.form.get("email", "").strip().lower()[:254]
+        ip = _client_ip()
+        # Seuls les échecs comptent, par adresse et par couple adresse-compte : un tiers qui se trompe
+        # de mot de passe depuis ailleurs ne peut pas empêcher le titulaire de se connecter.
+        if (actions.limit_reached("login_ip", ip, 30, 900) or actions.limit_reached("login_pair", f"{email}|{ip}", 5, 900)
+                or actions.limit_reached("login_email", email, 50, 900)):
+            abort(429, "Trop de tentatives. Réessaie plus tard.")
         row = get_db().execute("SELECT * FROM users WHERE email=?", (email,)).fetchone()
         try:
             valid = PASSWORDS.verify(row["password_hash"] if row else DUMMY_HASH, request.form.get("password", ""))
@@ -273,6 +294,8 @@ def create_app(config_override: dict | None = None) -> Flask:
         except VerifyMismatchError:
             valid = False
         if not valid:
+            for kind, key in (("login_ip", ip), ("login_pair", f"{email}|{ip}"), ("login_email", email)):
+                actions.record_attempt(kind, key)
             flash("Identifiants invalides.", "error")
             return render_template("login.html", next_url=next_url), 401
         if row["status"] != "approved":
@@ -281,6 +304,7 @@ def create_app(config_override: dict | None = None) -> Flask:
         session.clear()
         session["user_id"] = row["id"]
         session["sv"] = row["session_version"]
+        session["auth_at"] = int(time.time())
         session["csrf"] = secrets.token_urlsafe(32)
         session.permanent = True
         return _redirect_after_login(next_url, row["id"])
@@ -487,8 +511,11 @@ def create_app(config_override: dict | None = None) -> Flask:
         if not password_ok:
             flash("Mot de passe incorrect.", "error")
             return redirect(url_for("tokens"))
-        if not 1 <= len(name) <= 60 or any(ord(char) < 32 for char in name) or days not in api.TOKEN_DURATIONS \
-                or len(chosen) != len(request.form.getlist("permissions")):
+        try:
+            name = actions.clean_label(name, 60, "Nom")
+        except actions.ActionError:
+            name = ""
+        if not name or days not in api.TOKEN_DURATIONS or len(chosen) != len(request.form.getlist("permissions")):
             flash("Nom, permissions ou durée invalides.", "error")
             return redirect(url_for("tokens"))
         value = api.new_token()
@@ -552,7 +579,7 @@ def create_app(config_override: dict | None = None) -> Flask:
         def wrapper(*args, **kwargs):
             header = request.headers.get("Authorization", "")
             supplied = header[7:] if header.startswith("Bearer ") else ""
-            if not hmac.compare_digest(supplied, app.config["ADMIN_TOKEN"]):
+            if not _same_secret(app.config["ADMIN_TOKEN"], supplied):
                 return jsonify({"error": "non autorisé"}), 401
             return fn(*args, **kwargs)
         return wrapper
@@ -586,6 +613,27 @@ def create_app(config_override: dict | None = None) -> Flask:
             db.execute("INSERT OR IGNORE INTO blocked_emails(email,blocked_at) VALUES(?,?)", (row["email"], now_iso()))
             db.execute("DELETE FROM users WHERE id=?", (user_id,))
         return jsonify({"id": user_id, "status": "rejected", "email_blocked": True})
+
+    @app.post("/admin/api/users/<int:user_id>/suspend")
+    @admin_required
+    def admin_suspend(user_id: int):
+        """Suspend un compte approuvé : sessions, accès, jetons et services coupés, données conservées."""
+        db = get_db()
+        with db:
+            db.execute("BEGIN IMMEDIATE")
+            cursor = db.execute(
+                "UPDATE users SET status='pending', session_version=session_version+1 WHERE id=? AND status='approved'",
+                (user_id,),
+            )
+            if cursor.rowcount != 1:
+                db.rollback()
+                return jsonify({"error": "compte approuvé introuvable"}), 404
+            db.execute("DELETE FROM host_sessions WHERE user_id=?", (user_id,))
+            db.execute("DELETE FROM access_codes WHERE user_id=?", (user_id,))
+            db.execute("UPDATE api_tokens SET revoked_at=? WHERE user_id=? AND revoked_at IS NULL", (now_iso(), user_id))
+        # Routes et pairs du compte disparaissent de Caddy et de WireGuard à la synchronisation.
+        synced = actions.project_runtime(app)
+        return jsonify({"id": user_id, "status": "suspended", "synced": synced})
 
     @app.get("/internal/caddy/ask")
     def caddy_ask():

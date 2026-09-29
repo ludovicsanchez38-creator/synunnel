@@ -1,0 +1,7 @@
+{% extends "base.html" %}
+{% block title %}Connexion réussie{% endblock %}
+{% block head %}<meta http-equiv="refresh" content="0;url={{ target }}">{% endblock %}
+{% block content %}
+<section class="page-head"><span class="eyebrow">Connexion réussie</span><h1>Ouverture de {{ hostname }}</h1><p>Si la page ne s'ouvre pas d'elle-même dans une seconde, utilise le bouton ci-dessous.</p></section>
+<a class="button" href="{{ target }}">Continuer vers {{ hostname }}</a>
+{% endblock %}

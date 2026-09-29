@@ -16,7 +16,8 @@ def _json(schema: dict, description: str) -> dict:
 
 
 def _errors(*codes: int) -> dict:
-    labels = {400: "Requête mal formée", 401: "Jeton absent, invalide, expiré ou révoqué", 403: "Jeton en lecture seule",
+    labels = {400: "Corps illisible ou qui n'est pas un objet JSON", 401: "Jeton absent, invalide, expiré ou révoqué",
+              403: "Permission du jeton insuffisante pour cette opération",
               404: "Ressource introuvable dans ce compte", 409: "Conflit, quota atteint ou ressource utilisée",
               415: "Corps attendu en application/json", 422: "Champ invalide", 429: "Trop de requêtes (voir Retry-After)"}
     return {str(code): _json(ERROR, labels[code]) for code in codes}
@@ -24,8 +25,9 @@ def _errors(*codes: int) -> dict:
 
 def _op(summary: str, permission: str | None, ok: dict, *errors: int, body: dict | None = None,
         extra_ok: dict | None = None) -> dict:
+    codes = set(errors) | ({403} if permission else set()) | ({400, 415, 422} if body else set())
     operation = {"summary": summary, "security": [{"bearer": []}], "x-permission": permission or "lecture",
-                 "responses": {**ok, **(extra_ok or {}), **_errors(401, 429, *errors)}}
+                 "responses": {**ok, **(extra_ok or {}), **_errors(401, 429, *sorted(codes))}}
     if body:
         operation["requestBody"] = {"required": True, "content": {"application/json": {"schema": body}}}
     return operation
@@ -88,7 +90,7 @@ def document(app: Flask) -> dict:
                             409, 415, 422,
                             body={"type": "object", "additionalProperties": False,
                                   "required": ["domain", "mail_records_checked"],
-                                  "properties": {"domain": {"type": "string"},
+                                  "properties": {"domain": {"type": "string", "maxLength": 253},
                                                  "dkim_selectors": {"type": "array", "items": {"type": "string"},
                                                                     "maxItems": 20},
                                                  "mail_records_checked": {"type": "boolean", "description":
@@ -102,9 +104,9 @@ def document(app: Flask) -> dict:
                 "Ajouter un enregistrement (A, AAAA, CNAME, MX, TXT, CAA)", "domains",
                 {"201": _json({"type": "object"}, "Enregistrement créé")}, 404, 409, 415, 422,
                 body={"type": "object", "additionalProperties": False, "required": ["name", "type", "content"],
-                      "properties": {"name": {"type": "string", "description": "« @ » pour la racine"},
+                      "properties": {"name": {"type": "string", "maxLength": 255, "description": "« @ » pour la racine"},
                                      "type": {"type": "string", "enum": ["A", "AAAA", "CNAME", "MX", "TXT", "CAA"]},
-                                     "content": {"type": "string"},
+                                     "content": {"type": "string", "maxLength": 4096},
                                      "ttl": {"type": "integer", "minimum": 300, "maximum": 86400}}},
                 extra_ok={"200": _json({"type": "object"}, "Enregistrement identique déjà présent")}),
                 "parameters": ids("domain_id")}},
@@ -119,7 +121,8 @@ def document(app: Flask) -> dict:
                                  404), "parameters": ids("claim_id")},
             },
             "/claims/{claim_id}/verify": {"post": {**_op(
-                "Vérifier la preuve TXT et créer la zone", "domains",
+                "Vérifier la preuve TXT et créer la zone (20 vérifications par heure et par compte, 429 avec "
+                "Retry-After au-delà)", "domains",
                 {"201": _json({"type": "object"}, "Zone créée")}, 404, 409, 422,
                 extra_ok={"200": _json({"type": "object"}, "Déjà vérifiée : domaine existant")}),
                 "parameters": ids("claim_id")}},
@@ -153,10 +156,12 @@ def document(app: Flask) -> dict:
                     body={"type": "object", "additionalProperties": False,
                           "required": ["domain_id", "machine_id", "name", "port", "protected"],
                           "properties": {"domain_id": {"type": "integer"}, "machine_id": {"type": "integer"},
-                                         "name": {"type": "string", "description": "« nas » ou « @ » pour la racine"},
+                                         "name": {"type": "string", "maxLength": 255,
+                                                  "description": "« nas » ou « @ » pour la racine"},
                                          "port": {"type": "integer", "minimum": 1, "maximum": 65535},
                                          "protected": {"type": "boolean", "description":
-                                             "true : connexion Synunnel exigée ; false : adresse publique"}}},
+                                             "true : connexion Synunnel exigée ; false : adresse publique, qui "
+                                             "exige aussi la permission sharing"}}},
                     extra_ok={"200": _json({"type": "object"}, "Même demande rejouée : adresse existante")},
                 ),
             },

@@ -9,7 +9,9 @@ uniquement depuis le tableau de bord. Le cookie de session n'est jamais lu ici.
 
 import hashlib
 import secrets
+import threading
 import time
+from collections import deque
 from functools import wraps
 
 from flask import Blueprint, Flask, current_app, g, jsonify, request
@@ -23,8 +25,8 @@ TOKEN_PREFIX = "syn_"
 PERMISSIONS = {
     "domains": "Domaines et enregistrements DNS",
     "machines": "Machines",
-    "addresses": "Adresses",
-    "sharing": "Partage d'accès aux adresses protégées",
+    "addresses": "Adresses protégées",
+    "sharing": "Partage d'accès et adresses publiques",
 }
 TOKEN_DURATIONS = (7, 30)
 MAX_ACTIVE_TOKENS = 5
@@ -59,9 +61,10 @@ def _unauthorized(message: str) -> ApiError:
 
 
 def _client_ip() -> str:
-    if request.remote_addr in {"127.0.0.1", "::1"}:
-        return request.headers.get("X-Real-IP", request.remote_addr)
-    return request.remote_addr or "unknown"
+    raw = request.remote_addr
+    if raw in {"127.0.0.1", "::1"}:
+        raw = request.headers.get("X-Real-IP", raw)
+    return actions.client_bucket(raw)
 
 
 def _limit(kind: str, key: str, limit: int, window: int) -> None:
@@ -69,6 +72,31 @@ def _limit(kind: str, key: str, limit: int, window: int) -> None:
         actions.rate_limit(kind, key, limit, window)
     except actions.ActionError as exc:
         raise ApiError(429, "rate_limited", exc.message, {"Retry-After": str(window)}) from exc
+
+
+_READS: dict[int, deque] = {}
+_READS_LOCK = threading.Lock()
+
+
+def _limit_reads(user_id: int, limit: int = 600, window: int = 60) -> None:
+    """Lectures limitées en mémoire, par processus : aucune écriture en base pour une simple lecture."""
+    now = time.monotonic()
+    with _READS_LOCK:
+        hits = _READS.setdefault(user_id, deque())
+        while hits and now - hits[0] > window:
+            hits.popleft()
+        if len(hits) >= limit:
+            raise ApiError(429, "rate_limited", "Trop de lectures. Réessaie plus tard.", {"Retry-After": str(window)})
+        hits.append(now)
+
+
+def _refuse_anonymous() -> None:
+    """Un échec d'authentification compte pour l'adresse (/64 en IPv6) et pour toute l'instance."""
+    ip = _client_ip()
+    if actions.limit_reached("api_auth", ip, 20, 600) or actions.limit_reached("api_auth_all", "*", 2000, 600):
+        raise ApiError(429, "rate_limited", "Trop d'échecs d'authentification.", {"Retry-After": "600"})
+    actions.record_attempt("api_auth", ip)
+    actions.record_attempt("api_auth_all", "*")
 
 
 def _token_row(db, token_id: int):
@@ -83,8 +111,8 @@ def _authenticate():
     header = request.headers.get("Authorization", "")
     scheme, _, value = header.partition(" ")
     value = value.strip()
-    if scheme.lower() != "bearer" or not value.startswith(TOKEN_PREFIX) or len(value) > 128:
-        _limit("api_auth", _client_ip(), 20, 600)
+    if scheme.lower() != "bearer" or not value.startswith(TOKEN_PREFIX) or len(value) > 128 or not value.isascii():
+        _refuse_anonymous()
         raise _unauthorized("Jeton d'API manquant ou mal formé.")
     db = get_db()
     row = db.execute(
@@ -93,7 +121,7 @@ def _authenticate():
         (hash_token(value), int(time.time())),
     ).fetchone()
     if row is None:
-        _limit("api_auth", _client_ip(), 20, 600)
+        _refuse_anonymous()
         raise _unauthorized("Jeton d'API invalide, expiré ou révoqué.")
     now = int(time.time())
     if not row["last_used_at"] or now - row["last_used_at"] >= 60:
@@ -112,8 +140,8 @@ def _guard(db) -> None:
 
 def _audit(db, action: str, resource: str) -> None:
     db.execute(
-        "INSERT INTO api_audit(at,user_id,token_id,action,resource) VALUES(?,?,?,?,?)",
-        (now_iso(), g.api_token["user_id"], g.api_token["id"], action, resource),
+        "INSERT INTO api_audit(at,user_id,token_id,action,resource,ip) VALUES(?,?,?,?,?,?)",
+        (now_iso(), g.api_token["user_id"], g.api_token["id"], action, resource[:300], _client_ip()),
     )
 
 
@@ -124,7 +152,7 @@ def endpoint(permission: str | None = None):
         def wrapper(*args, **kwargs):
             _authenticate()
             if permission is None:
-                _limit("api_read", str(g.api_token["user_id"]), 600, 60)
+                _limit_reads(g.api_token["user_id"])
             else:
                 if permission not in g.api_token["permissions"]:
                     raise ApiError(403, "forbidden", f"Ce jeton n'a pas la permission « {permission} ».")
@@ -134,11 +162,17 @@ def endpoint(permission: str | None = None):
     return decorator
 
 
+LIMITS = {"content": 4096, "domain": 253}
+
+
 def _payload(fields: dict[str, type], required: set[str]) -> dict:
     """Corps JSON strict : objet, champs connus, types exacts (un booléen n'est pas un entier)."""
     if request.mimetype != "application/json":
         raise ApiError(415, "unsupported_media_type", "Corps attendu en application/json.")
-    data = request.get_json(silent=True)
+    try:
+        data = request.get_json(silent=True)
+    except RecursionError:
+        data = None
     if not isinstance(data, dict):
         raise ApiError(400, "bad_request", "Le corps doit être un objet JSON.")
     unknown = set(data) - set(fields)
@@ -156,8 +190,8 @@ def _payload(fields: dict[str, type], required: set[str]) -> dict:
             continue
         if type(value) is not expected:
             raise ApiError(422, "invalid", f"Type inattendu pour {key}.")
-        if expected is str and len(value) > 255:
-            raise ApiError(422, "invalid", f"{key} est trop long.")
+        if expected is str and len(value) > LIMITS.get(key, 255):
+            raise ApiError(422, "invalid", f"{key} est trop long ({LIMITS.get(key, 255)} caractères au plus).")
         if expected is int and not 0 < value < 2**31:
             raise ApiError(422, "invalid", f"{key} hors limites.")
     return data
@@ -167,7 +201,7 @@ def _run(fn, *args, **kwargs):
     try:
         return fn(*args, **kwargs)
     except actions.ActionError as exc:
-        raise ApiError(exc.status, exc.code, exc.message) from exc
+        raise ApiError(exc.status, exc.code, exc.message, exc.headers) from exc
 
 
 # ---------------------------------------------------------------- représentations (liste blanche)
@@ -335,6 +369,9 @@ def list_addresses():
 def create_address():
     data = _payload({"domain_id": int, "machine_id": int, "name": str, "port": int, "protected": bool},
                     {"domain_id", "machine_id", "name", "port", "protected"})
+    if not data["protected"] and "sharing" not in g.api_token["permissions"]:
+        # Ouvrir un service à tout Internet est une décision d'accès : elle exige la permission « sharing ».
+        raise ApiError(403, "forbidden", "Publier une adresse sans protection exige aussi la permission « sharing ».")
     result = _run(actions.create_address, current_app, g.api_token["user_id"], data["domain_id"],
                   data["machine_id"], data["name"], data["port"], data["protected"], _guard, _audit)
     row = _run(actions.owned_address, g.api_token["user_id"], result["id"])
@@ -370,6 +407,14 @@ def openapi():
     return jsonify(document(current_app))
 
 
+@bp.before_request
+def bounded_identifiers():
+    # Un identifiant hors de la plage SQLite n'existe pas : 404 plutôt qu'une erreur interne.
+    for value in (request.view_args or {}).values():
+        if isinstance(value, int) and not 0 < value < 2**31:
+            raise ApiError(404, "not_found", "Ressource introuvable.")
+
+
 def register(app: Flask) -> None:
     app.register_blueprint(bp)
 
@@ -384,6 +429,7 @@ def register(app: Flask) -> None:
                     500: "internal_error"}.get(exc.code, "http_error")
             # Jamais le détail technique d'une erreur interne dans la réponse.
             message = "Erreur interne." if (exc.code or 500) >= 500 else (exc.description or "Erreur HTTP.")
-            return _error(exc.code or 500, code, message)
+            headers = {"Allow": ", ".join(sorted(exc.valid_methods))} if getattr(exc, "valid_methods", None) else None
+            return _error(exc.code or 500, code, message, headers)
         return exc
 

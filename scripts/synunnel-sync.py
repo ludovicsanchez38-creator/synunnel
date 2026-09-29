@@ -12,6 +12,7 @@ import os
 import re
 import sqlite3
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
@@ -41,10 +42,12 @@ def atomic_write(path: Path, content: str, mode: int) -> None:
 
 
 def valid_key(key: str) -> bool:
+    """Forme canonique exigée, comme wireguard-tools : une clé qu'il refuserait bloquerait tout wg0."""
     try:
-        return len(base64.b64decode(key, validate=True)) == 32
-    except (ValueError, binascii.Error):
+        raw = base64.b64decode(key, validate=True)
+    except (ValueError, binascii.Error, TypeError):
         return False
+    return len(raw) == 32 and base64.b64encode(raw).decode() == key
 
 
 def wireguard_config(db: sqlite3.Connection) -> str:
@@ -57,12 +60,21 @@ def wireguard_config(db: sqlite3.Connection) -> str:
         f"PreUp = /usr/sbin/nft -f {FIREWALL_PATH}",
         "PostDown = /usr/sbin/nft delete table inet synunnel_wg", "",
     ]
-    for row in db.execute("SELECT ip,public_key FROM machines ORDER BY ip"):
+    seen: set[str] = set()
+    rows = db.execute(
+        "SELECT m.ip, m.public_key FROM machines m JOIN users u ON u.id=m.user_id AND u.status='approved' "
+        "ORDER BY m.ip"
+    )
+    for row in rows:
         ip = ipaddress.ip_address(row["ip"])
-        if ip not in ipaddress.ip_network("10.88.0.0/24") or ip in (ipaddress.ip_address("10.88.0.1"),):
-            raise ValueError("Adresse WireGuard hors plage")
-        if not valid_key(row["public_key"]):
-            raise ValueError("Clé publique d'un pair invalide")
+        # Un pair invalide est écarté et signalé : il ne doit jamais empêcher les autres de fonctionner.
+        if ip not in ipaddress.ip_network("10.88.0.0/24") or ip == ipaddress.ip_address("10.88.0.1"):
+            print(f"Pair écarté, adresse hors plage : {row['ip']}", file=sys.stderr)
+            continue
+        if not valid_key(row["public_key"]) or row["public_key"] in seen:
+            print(f"Pair écarté, clé publique invalide ou en double : {row['ip']}", file=sys.stderr)
+            continue
+        seen.add(row["public_key"])
         lines.extend(["[Peer]", f"PublicKey = {row['public_key']}", f"AllowedIPs = {ip}/32", ""])
     return "\n".join(lines)
 
@@ -91,7 +103,7 @@ def caddy_routes(db: sqlite3.Connection) -> str:
             "    }",
             # Un jeton d'API Synunnel envoyé par erreur à cette adresse ne doit jamais
             # atteindre le service qui s'y trouve.
-            f"    @synunnel_token_{n} header_regexp Authorization ^[Bb]earer[[:space:]]+syn_",
+            f"    @synunnel_token_{n} header_regexp Authorization (?i)^bearer[[:space:]]+syn_",
             f"    handle @synunnel_token_{n} {{",
             '        respond "Jeton Synunnel refusé sur cette adresse" 421',
             "    }",
@@ -138,9 +150,19 @@ def main() -> None:
 
 
 def apply(new_wg: str, new_routes: str) -> None:
+    """WireGuard puis Caddy, chacun de son côté : l'échec de l'un n'empêche pas l'autre d'être appliqué."""
+    failures = []
+    for step in (apply_wireguard, apply_caddy):
+        try:
+            step(new_wg, new_routes)
+        except Exception as exc:  # noqa: BLE001 - on tente les deux, on échoue ensuite
+            failures.append(f"{step.__name__} : {exc}")
+    if failures:
+        raise SystemExit("Synchronisation incomplète : " + " ; ".join(failures))
 
+
+def apply_wireguard(new_wg: str, _routes: str) -> None:
     old_wg = WG_CONFIG_PATH.read_text() if WG_CONFIG_PATH.exists() else ""
-    old_routes = CADDY_ROUTES_PATH.read_text() if CADDY_ROUTES_PATH.exists() else ""
     if new_wg != old_wg:
         atomic_write(WG_CONFIG_PATH, new_wg, 0o600)
         try:
@@ -161,6 +183,10 @@ def apply(new_wg: str, new_routes: str) -> None:
     elif not wireguard_active():
         # Configuration inchangée mais tunnel arrêté (redémarrage, arrêt manuel) : on le relance.
         run("/usr/bin/systemctl", "start", "wg-quick@wg0")
+
+
+def apply_caddy(_wg: str, new_routes: str) -> None:
+    old_routes = CADDY_ROUTES_PATH.read_text() if CADDY_ROUTES_PATH.exists() else ""
     if new_routes != old_routes:
         atomic_write(CADDY_ROUTES_PATH, new_routes, 0o644)
         try:

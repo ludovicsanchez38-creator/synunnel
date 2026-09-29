@@ -104,9 +104,16 @@ def canonical_content(kind: str, content: str) -> str:
             raise ValueError("L'adresse IP ne correspond pas au type DNS.")
         return str(ip)
     if kind == "TXT" and not content.startswith('"'):
-        if len(content.encode("utf-8")) > 255:
-            raise ValueError("Un segment TXT ne doit pas dépasser 255 octets ; utilise des guillemets pour plusieurs segments.")
-        content = '"' + content.replace("\\", "\\\\").replace('"', '\\"') + '"'
+        # Une valeur longue (clé DKIM 2048 bits) est découpée en segments de 255 octets au plus,
+        # comme le font les hébergeurs DNS : les résolveurs les recollent.
+        segments, current = [], ""
+        for char in content:
+            if len((current + char).encode("utf-8")) > 255:
+                segments.append(current)
+                current = ""
+            current += char
+        segments.append(current)
+        content = " ".join('"' + part.replace("\\", "\\\\").replace('"', '\\"') + '"' for part in segments)
     try:
         record = dns.rdata.from_text(
             dns.rdataclass.IN, dns.rdatatype.from_text(kind), content,

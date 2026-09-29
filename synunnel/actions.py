@@ -11,12 +11,15 @@ base et le rapprochement périodique (scripts/reconcile.py) le termine.
 """
 
 import base64
+import ipaddress
+import random
 import re
 import secrets
 import shlex
 import sqlite3
 import subprocess
 import time
+import unicodedata
 from collections.abc import Callable
 
 import requests
@@ -36,7 +39,7 @@ from .dns import (
 )
 from .provision import generate_keypair
 
-EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
+EMAIL_RE = re.compile(r"^[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+$")
 MACHINE_NAME_MAX = 80
 Guard = Callable[[sqlite3.Connection], None] | None
 
@@ -44,30 +47,60 @@ Guard = Callable[[sqlite3.Connection], None] | None
 class ActionError(Exception):
     """Refus d'une action, avec le statut HTTP et un code stable pour les agents."""
 
-    def __init__(self, status: int, code: str, message: str):
+    def __init__(self, status: int, code: str, message: str, headers: dict | None = None):
         super().__init__(message)
         self.status = status
         self.code = code
         self.message = message
+        self.headers = headers or {}
 
 
 def _invalid(message: str) -> ActionError:
     return ActionError(422, "invalid", message)
 
 
-def rate_limit(kind: str, key: str, limit: int, window: int) -> None:
+def client_bucket(raw: str | None) -> str:
+    """Clé de limitation d'une adresse : une IPv6 compte pour son /64, qu'un seul abonné détient en entier."""
+    try:
+        ip = ipaddress.ip_address(raw or "")
+    except ValueError:
+        return "inconnue"
+    if ip.version == 6:
+        if ip.ipv4_mapped:
+            return str(ip.ipv4_mapped)
+        return str(ipaddress.ip_network(f"{ip}/64", strict=False))
+    return str(ip)
+
+
+def limit_reached(kind: str, key: str, limit: int, window: int) -> bool:
+    return get_db().execute(
+        "SELECT COUNT(*) FROM attempts WHERE kind=? AND key=? AND at>=?", (kind, key, int(time.time()) - window),
+    ).fetchone()[0] >= limit
+
+
+def record_attempt(kind: str, key: str) -> None:
     db = get_db()
     now = int(time.time())
-    db.execute("DELETE FROM attempts WHERE at < ?", (now - 86400,))
-    count = db.execute(
-        "SELECT COUNT(*) FROM attempts WHERE kind=? AND key=? AND at>=?",
-        (kind, key, now - window),
-    ).fetchone()[0]
-    if count >= limit:
-        db.commit()
-        raise ActionError(429, "rate_limited", "Trop de tentatives. Réessaie plus tard.")
+    if random.random() < 0.01:
+        # Purge occasionnelle et indexée : jamais un parcours de table à chaque requête.
+        db.execute("DELETE FROM attempts WHERE at < ?", (now - 86400,))
     db.execute("INSERT INTO attempts(kind, key, at) VALUES (?, ?, ?)", (kind, key, now))
     db.commit()
+
+
+def rate_limit(kind: str, key: str, limit: int, window: int) -> None:
+    if limit_reached(kind, key, limit, window):
+        raise ActionError(429, "rate_limited", "Trop de tentatives. Réessaie plus tard.", {"Retry-After": str(window)})
+    record_attempt(kind, key)
+
+
+def clean_label(value, maximum: int, what: str) -> str:
+    """Texte affiché à un humain : sans caractère de contrôle ni caractère invisible ou de mise en forme."""
+    text = unicodedata.normalize("NFC", value.strip()) if isinstance(value, str) else ""
+    if not 1 <= len(text) <= maximum or any(unicodedata.category(char) in {"Cc", "Cf", "Co", "Cs", "Zl", "Zp"}
+                                             for char in text):
+        raise ActionError(422, "invalid", f"{what} invalide (1 à {maximum} caractères visibles).")
+    return text
 
 
 def _pdns(app: Flask) -> PowerDNS:
@@ -142,6 +175,8 @@ def parse_grants(raw: str | list[str]) -> list[str]:
     parts = raw if isinstance(raw, list) else re.split(r"[,;\s]+", raw.strip())
     if not all(isinstance(part, str) for part in parts):
         raise _invalid("Liste invalide : des adresses mail sous forme de texte.")
+    # Adresses en ASCII seulement : un « а » cyrillique ou un caractère invisible ne doit pas
+    # pouvoir passer pour l'adresse d'une autre personne.
     emails = sorted({part.strip().lower() for part in parts if part.strip()})
     if len(emails) > 100 or any(len(email) > 254 or not EMAIL_RE.fullmatch(email) for email in emails):
         raise _invalid("Liste invalide : au maximum 100 adresses mail valides.")
@@ -242,7 +277,7 @@ def create_claim(app: Flask, user_id: int, domain_raw: str, selectors: list[str]
         refuse_overlap(db, domain, user_id)
         owned = db.execute("SELECT COUNT(*) FROM domains WHERE user_id=?", (user_id,)).fetchone()[0]
         pending = db.execute(
-            "SELECT COUNT(*) FROM domain_claims WHERE user_id=? AND name<>?", (user_id, domain),
+            "SELECT COUNT(*) FROM domain_claims WHERE user_id=? AND name<>? AND domain_id IS NULL", (user_id, domain),
         ).fetchone()[0]
         if owned + pending >= app.config["MAX_DOMAINS_PER_USER"]:
             raise ActionError(409, "quota", "Nombre maximal de domaines atteint pour ce compte.")
@@ -252,7 +287,7 @@ def create_claim(app: Flask, user_id: int, domain_raw: str, selectors: list[str]
             (user_id, domain, secrets.token_urlsafe(24), ",".join(clean), now_iso()),
         )
         if audit:
-            audit(db, "claim.create", f"domain:{domain}")
+            audit(db, "claim.create", f"claim {domain}")
     row = db.execute("SELECT * FROM domain_claims WHERE user_id=? AND name=?", (user_id, domain)).fetchone()
     return row, existing is None
 
@@ -261,11 +296,13 @@ def cancel_claim(user_id: int, claim_id: int, guard: Guard = None, audit: Callab
     db = get_db()
     with db:
         _begin(db, guard)
-        if db.execute("DELETE FROM domain_claims WHERE id=? AND user_id=? AND domain_id IS NULL",
-                      (claim_id, user_id)).rowcount != 1:
+        gone = db.execute("SELECT name FROM domain_claims WHERE id=? AND user_id=? AND domain_id IS NULL",
+                          (claim_id, user_id)).fetchone()
+        if gone is None:
             raise ActionError(404, "not_found", "Demande introuvable.")
+        db.execute("DELETE FROM domain_claims WHERE id=?", (claim_id,))
         if audit:
-            audit(db, "claim.delete", f"claim:{claim_id}")
+            audit(db, "claim.delete", f"claim:{claim_id} {gone['name']}")
 
 
 def verify_claim(app: Flask, user_id: int, claim_id: int, guard: Guard = None, audit: Callable | None = None) -> dict:
@@ -324,7 +361,7 @@ def verify_claim(app: Flask, user_id: int, claim_id: int, guard: Guard = None, a
             db.execute("DELETE FROM domain_claims WHERE name=? AND id<>?", (domain, claim_id))
             db.execute("UPDATE domain_claims SET domain_id=? WHERE id=?", (domain_id, claim_id))
             if audit:
-                audit(db, "domain.create", f"domain:{domain_id}")
+                audit(db, "domain.create", f"domain:{domain_id} {domain}")
     except sqlite3.IntegrityError as exc:
         raise ActionError(409, "unavailable", "Ce domaine ne peut pas être ajouté sur cette instance.") from exc
     synced = project_zone(app, {"id": domain_id, "name": domain})
@@ -349,30 +386,42 @@ def add_record(app: Flask, user_id: int, domain_id: int, name_raw: str, kind_raw
         with db:
             _begin(db, guard)
             owned_domain(user_id, domain_id)
-            same = db.execute("SELECT id FROM records WHERE domain_id=? AND name=? AND type=? AND content=?",
+            same = db.execute("SELECT id, ttl FROM records WHERE domain_id=? AND name=? AND type=? AND content=?",
                               (domain_id, name, kind, content)).fetchone()
-            if same is not None:
+            if same is not None and same["ttl"] == ttl:
                 return {"id": same["id"], "synced": True, "created": False}
-            count = db.execute("SELECT COUNT(*) FROM records WHERE domain_id=?", (domain_id,)).fetchone()[0]
-            if count >= app.config["MAX_RECORDS_PER_DOMAIN"]:
-                raise ActionError(409, "quota", "Nombre maximal d'enregistrements atteint pour ce domaine.")
-            existing = db.execute("SELECT type FROM records WHERE domain_id=? AND name=?", (domain_id, name)).fetchall()
-            if (kind == "CNAME" and existing) or (kind != "CNAME" and any(row["type"] == "CNAME" for row in existing)):
-                raise ActionError(409, "conflict", "Un CNAME ne peut partager son nom avec un autre enregistrement.")
-            if kind in {"A", "AAAA", "CNAME"} and db.execute(
-                "SELECT 1 FROM addresses WHERE hostname=?", (host,),
-            ).fetchone():
-                raise ActionError(409, "conflict",
-                                  "Cette adresse est gérée par Synunnel ; supprime-la avant de modifier son DNS.")
-            record_id = db.execute(
-                "INSERT INTO records(domain_id,name,type,content,ttl) VALUES(?,?,?,?,?)",
-                (domain_id, name, kind, content, ttl),
-            ).lastrowid
-            if audit:
-                audit(db, "record.create", f"record:{record_id}")
+            if same is not None:
+                db.execute("UPDATE records SET ttl=? WHERE id=?", (ttl, same["id"]))
+                if audit:
+                    audit(db, "record.update", f"record:{same['id']} {name} {kind} ttl={ttl}")
+                record_id = same["id"]
+                updated = True
+            else:
+                updated = False
+            if not updated:
+                count = db.execute("SELECT COUNT(*) FROM records WHERE domain_id=?", (domain_id,)).fetchone()[0]
+                if count >= app.config["MAX_RECORDS_PER_DOMAIN"]:
+                    raise ActionError(409, "quota", "Nombre maximal d'enregistrements atteint pour ce domaine.")
+                existing = db.execute("SELECT type FROM records WHERE domain_id=? AND name=?",
+                                      (domain_id, name)).fetchall()
+                if (kind == "CNAME" and existing) or (kind != "CNAME" and any(row["type"] == "CNAME"
+                                                                              for row in existing)):
+                    raise ActionError(409, "conflict",
+                                      "Un CNAME ne peut partager son nom avec un autre enregistrement.")
+                if kind in {"A", "AAAA", "CNAME"} and db.execute(
+                    "SELECT 1 FROM addresses WHERE hostname=?", (host,),
+                ).fetchone():
+                    raise ActionError(409, "conflict",
+                                      "Cette adresse est gérée par Synunnel ; supprime-la avant de modifier son DNS.")
+                record_id = db.execute(
+                    "INSERT INTO records(domain_id,name,type,content,ttl) VALUES(?,?,?,?,?)",
+                    (domain_id, name, kind, content, ttl),
+                ).lastrowid
+                if audit:
+                    audit(db, "record.create", f"record:{record_id} {name} {kind} {content[:120]}")
     except sqlite3.IntegrityError as exc:
         raise ActionError(409, "conflict", "Cet enregistrement existe déjà.") from exc
-    return {"id": record_id, "synced": project_zone(app, domain), "created": True}
+    return {"id": record_id, "synced": project_zone(app, domain), "created": not updated}
 
 
 def delete_record(app: Flask, user_id: int, domain_id: int, record_id: int, guard: Guard = None,
@@ -381,31 +430,32 @@ def delete_record(app: Flask, user_id: int, domain_id: int, record_id: int, guar
     db = get_db()
     with db:
         _begin(db, guard)
-        cursor = db.execute(
-            "DELETE FROM records WHERE id=? AND domain_id IN (SELECT id FROM domains WHERE id=? AND user_id=?)",
-            (record_id, domain_id, user_id),
-        )
-        if cursor.rowcount != 1:
+        gone = db.execute(
+            "SELECT r.name, r.type, r.content FROM records r JOIN domains d ON d.id=r.domain_id "
+            "WHERE r.id=? AND d.id=? AND d.user_id=?", (record_id, domain_id, user_id),
+        ).fetchone()
+        if gone is None:
             raise ActionError(404, "not_found", "Enregistrement introuvable.")
+        db.execute("DELETE FROM records WHERE id=?", (record_id,))
         if audit:
-            audit(db, "record.delete", f"record:{record_id}")
+            audit(db, "record.delete", f"record:{record_id} {gone['name']} {gone['type']} {gone['content'][:120]}")
     return {"synced": project_zone(app, domain)}
 
 
 # ---------------------------------------------------------------- machines
 
 def valid_public_key(value) -> bool:
+    """Forme canonique exigée, comme wireguard-tools : les bits de bourrage doivent être nuls."""
     try:
-        return isinstance(value, str) and len(base64.b64decode(value, validate=True)) == 32 and len(value) == 44
+        raw = base64.b64decode(value, validate=True) if isinstance(value, str) else b""
     except ValueError:
         return False
+    return len(raw) == 32 and base64.b64encode(raw).decode() == value
 
 
 def _insert_machine(app: Flask, user_id: int, name_raw, public_key: str, guard: Guard,
                     audit: Callable | None = None) -> dict:
-    name = name_raw.strip() if isinstance(name_raw, str) else ""
-    if not 1 <= len(name) <= MACHINE_NAME_MAX or any(ord(char) < 32 for char in name):
-        raise _invalid("Nom de machine invalide (1 à 80 caractères).")
+    name = clean_label(name_raw, MACHINE_NAME_MAX, "Nom de machine")
     if not valid_public_key(public_key):
         raise _invalid("Clé publique WireGuard invalide.")
     db = get_db()
@@ -431,7 +481,7 @@ def _insert_machine(app: Flask, user_id: int, name_raw, public_key: str, guard: 
                 (user_id, name, ip, public_key, now_iso()),
             ).lastrowid
             if audit:
-                audit(db, "machine.create", f"machine:{machine_id}")
+                audit(db, "machine.create", f"machine:{machine_id} {name} {ip}")
     except sqlite3.IntegrityError as exc:
         raise ActionError(409, "conflict", "Nom de machine ou clé publique déjà utilisés.") from exc
     return {"id": machine_id, "name": name, "ip": ip, "created": True, "synced": project_runtime(app)}
@@ -472,12 +522,12 @@ def delete_machine(app: Flask, user_id: int, machine_id: int, guard: Guard = Non
         # Vérification et suppression sous le même verrou : une adresse ajoutée entre les deux
         # serait sinon supprimée en cascade sans que son propriétaire le sache.
         _begin(db, guard)
-        owned_machine(user_id, machine_id)
+        machine = owned_machine(user_id, machine_id)
         if db.execute("SELECT 1 FROM addresses WHERE machine_id=?", (machine_id,)).fetchone():
             raise ActionError(409, "in_use", "Supprime d'abord les adresses liées à cette machine.")
         db.execute("DELETE FROM machines WHERE id=? AND user_id=?", (machine_id, user_id))
         if audit:
-            audit(db, "machine.delete", f"machine:{machine_id}")
+            audit(db, "machine.delete", f"machine:{machine_id} {machine['name']} {machine['ip']}")
     return {"synced": project_runtime(app)}
 
 
@@ -532,7 +582,8 @@ def create_address(app: Flask, user_id: int, domain_id, machine_id, name_raw, po
                 (domain_id, machine_id, hostname, port, int(bool(protected)), now_iso(), secrets.token_hex(12)),
             ).lastrowid
             if audit:
-                audit(db, "address.create", f"address:{address_id}")
+                audit(db, "address.create", f"address:{address_id} {hostname} port={port} "
+                                        f"{'protégée' if protected else 'publique'}")
     except sqlite3.IntegrityError as exc:
         raise ActionError(409, "conflict", "Cette adresse existe déjà.") from exc
     synced = project_zone(app, domain) & project_runtime(app)
@@ -549,7 +600,7 @@ def delete_address(app: Flask, user_id: int, address_id: int, guard: Guard = Non
         db.execute("DELETE FROM host_sessions WHERE hostname=?", (row["hostname"],))
         db.execute("DELETE FROM access_codes WHERE hostname=?", (row["hostname"],))
         if audit:
-            audit(db, "address.delete", f"address:{address_id}")
+            audit(db, "address.delete", f"address:{address_id} {row['hostname']}")
     domain = {"id": row["domain_id"], "name": row["domain_name"]}
     return {"synced": project_zone(app, domain) & project_runtime(app)}
 
@@ -591,5 +642,6 @@ def set_access(user_id: int, address_id: int, shared: bool, emails_raw, guard: G
         db.execute("DELETE FROM host_sessions WHERE hostname=?", (address["hostname"],))
         db.execute("DELETE FROM access_codes WHERE hostname=?", (address["hostname"],))
         if audit:
-            audit(db, "access.update", f"address:{address_id}")
+            audit(db, "access.update", f"address:{address_id} {address['hostname']} "
+                                       f"shared={int(bool(shared))} {len(emails)} adresse(s)")
     return emails if shared else []

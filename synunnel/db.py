@@ -94,6 +94,7 @@ CREATE TABLE IF NOT EXISTS attempts (
     at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_attempts ON attempts(kind, key, at);
+CREATE INDEX IF NOT EXISTS idx_attempts_at ON attempts(at);
 CREATE TABLE IF NOT EXISTS api_tokens (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -113,7 +114,8 @@ CREATE TABLE IF NOT EXISTS api_audit (
     user_id INTEGER NOT NULL,
     token_id INTEGER,
     action TEXT NOT NULL,
-    resource TEXT NOT NULL
+    resource TEXT NOT NULL,
+    ip TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_api_audit_at ON api_audit(at);
 CREATE TABLE IF NOT EXISTS admin_audit (

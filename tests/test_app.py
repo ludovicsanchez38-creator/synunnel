@@ -192,8 +192,10 @@ def test_ask_and_protected_address_callback_is_single_use(app):
         "csrf_token": login_csrf, "email": "owner@example.net", "password": "mot-de-passe-long-123",
         "next": "https://private.owner.example.net/hello",
     })
-    assert approved.status_code == 302
-    callback = urlsplit(approved.headers["Location"])
+    # Après un formulaire, une page du tableau de bord relaie vers l'adresse (form-action 'self').
+    assert approved.status_code == 200 and approved.headers["Cache-Control"] == "no-store"
+    relay = re.search(r'href="([^"]+)">Continuer', approved.get_data(as_text=True)).group(1).replace("&amp;", "&")
+    callback = urlsplit(relay)
     assert callback.hostname == "private.owner.example.net"
     first = browser.get(callback.path + "?" + callback.query, base_url="https://private.owner.example.net")
     assert first.status_code == 302
