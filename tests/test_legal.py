@@ -97,3 +97,14 @@ def test_installer_quotes_the_operator_name_and_confines_the_operator_files():
     for key in ("OPERATOR_NAME", "ADMIN_CONTACT", "LEGAL_FILE", "PRIVACY_FILE"):
         assert key in completion
     assert "printf \"%s='%s'\\n\"" in completion
+
+
+def test_readme_recipe_covers_an_instance_already_installed():
+    """Constat 7 de la revue Codex : après une première installation, les quatre lignes existent (vides)
+    dans synunnel.env et font foi ; passer les réglages au script ne suffit plus."""
+    from pathlib import Path
+
+    readme = (Path(__file__).resolve().parent.parent / "README.md").read_text()
+    section = readme.split("**Mentions légales et confidentialité**", 1)[1].split("Le dépôt peut vivre", 1)[0]
+    assert "font foi" in section and "OPERATOR_NAME='" in section and "/etc/synunnel/synunnel.env" in section
+    assert "root:synunnel" in section and "relancez" in section.lower()

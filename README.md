@@ -56,13 +56,15 @@ sudo env SMTP_HOST=smtp.example.org SMTP_USER=noreply@example.org SMTP_FROM=nore
 
 Si `/etc/synunnel/synunnel.env` contient déjà des lignes `SMTP_*` (même vides), ce sont elles qui font foi : renseignez-les dans ce fichier, puis relancez le script. Le script ne lit jamais le fichier du mot de passe : il en fixe seulement les droits (root:synunnel, 0640). Publiez SPF, DKIM et DMARC pour le domaine d'envoi chez son hébergeur DNS. Sans ces réglages, le mot de passe oublié passe par un ticket de l'administrateur.
 
-**Mentions légales et confidentialité** (à publier avant d'ouvrir l'instance au public). Complétez les modèles [docs/modeles/mentions-legales.md](docs/modeles/mentions-legales.md) et [docs/modeles/confidentialite.md](docs/modeles/confidentialite.md), déposez-les dans `/etc/synunnel/`, puis passez les réglages :
+**Mentions légales et confidentialité** (à publier avant d'ouvrir l'instance au public). Complétez les modèles [docs/modeles/mentions-legales.md](docs/modeles/mentions-legales.md) et [docs/modeles/confidentialite.md](docs/modeles/confidentialite.md), déposez-les dans `/etc/synunnel/`, puis, au premier lancement ou sur une instance dont `/etc/synunnel/synunnel.env` n'a pas encore ces lignes, passez les réglages au script :
 
 ```bash
 sudo install -m 0640 mentions-legales.md confidentialite.md /etc/synunnel/
 sudo env OPERATOR_NAME="Exemple SAS" ADMIN_CONTACT=contact@example.org \
   LEGAL_FILE=/etc/synunnel/mentions-legales.md PRIVACY_FILE=/etc/synunnel/confidentialite.md ./scripts/install.sh
 ```
+
+Si `/etc/synunnel/synunnel.env` contient déjà les lignes `OPERATOR_NAME`, `ADMIN_CONTACT`, `LEGAL_FILE` et `PRIVACY_FILE` (même vides, ce qui est le cas après une installation faite sans elles), ce sont elles qui font foi : renseignez-les dans ce fichier, entre apostrophes droites (`OPERATOR_NAME='Exemple SAS'`, `LEGAL_FILE='/etc/synunnel/mentions-legales.md'`), puis relancez `sudo ./scripts/install.sh`, qui vérifie les valeurs et donne aux deux fichiers leurs droits (root:synunnel, 0640) ; `sudo systemctl restart synunnel` ne suffit pas pour ces droits.
 
 Les pages `/mentions-legales` et `/confidentialite` sont liées en pied de page et sous chaque formulaire ; le nom de l'exploitant et l'adresse de contact apparaissent aussi dans le mail envoyé aux invités, avec le lien vers la notice. Les textes sont relus à chaque affichage : les modifier ne demande pas de redémarrage. Ils acceptent titres (`#`), paragraphes, listes, gras et liens `https`, `mailto` ou vers une page de l'instance ; tout autre balisage est affiché tel quel. `OPERATOR_NAME` s'écrit sans apostrophe droite (utilisez ’), guillemet, `\`, `$` ni `` ` ``. Sans ces fichiers, les deux pages indiquent que le texte n'est pas encore publié.
 
