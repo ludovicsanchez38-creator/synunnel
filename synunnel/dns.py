@@ -184,25 +184,50 @@ def public_address(value: str) -> bool:
 
 
 def delegation_status(domain: str, nameservers: tuple[str, str] | None = None) -> tuple[bool | None, list[str]]:
-    """Interroge directement les serveurs de la zone parente."""
-    parent = dns.name.from_text(domain).parent().to_text()
+    """Interroge directement un serveur de la zone parente.
+
+    Renvoie (état, serveurs désignés) : True si la parente désigne tous les serveurs de l'instance, False
+    sur une réponse exploitable qui montre la délégation ailleurs ou absente (NXDOMAIN, ou SOA de la parente
+    sans NS), None dès que la réponse ne prouve rien (erreur, troncature persistante, NS d'un autre nom).
+    Une suppression ne s'appuie que sur False, et encore faut-il qu'aucun serveur de l'instance ne figure
+    dans la liste (voir still_designated).
+    """
+    name = dns.name.from_text(domain)
     try:
-        parent_ns = dns.resolver.resolve(parent, "NS", lifetime=2)
+        parent_ns = dns.resolver.resolve(name.parent(), "NS", lifetime=2)
         hosts = [item.target.to_text() for item in parent_ns]
         ip = next(str(item) for item in dns.resolver.resolve(hosts[0], "A", lifetime=2) if public_address(str(item)))
-        query = dns.message.make_query(f"{domain}.", "NS")
+        query = dns.message.make_query(name, "NS")
         query.flags &= ~dns.flags.RD
-        response = dns.query.udp(query, ip, timeout=2)
-        seen = {
-            item.target.to_text().lower()
-            for section in (response.answer, response.authority)
-            for rrset in section if rrset.rdtype == dns.rdatatype.NS
-            for item in rrset
-        }
+        # Réponse tronquée : reprise en TCP. Une liste de serveurs incomplète n'est jamais lue comme entière.
+        response, _ = dns.query.udp_with_fallback(query, ip, timeout=2)
     except (dns.exception.DNSException, OSError, IndexError, StopIteration):
         return None, []
-    expected = set(nameservers or configured_nameservers())
+    if response.flags & dns.flags.TC or response.rcode() not in (dns.rcode.NOERROR, dns.rcode.NXDOMAIN):
+        return None, []
+    # Seuls comptent les NS du domaine lui-même, pas ceux d'un autre nom glissés dans la réponse.
+    seen = {
+        item.target.to_text().lower()
+        for section in (response.answer, response.authority)
+        for rrset in section if rrset.rdtype == dns.rdatatype.NS and rrset.name == name
+        for item in rrset
+    }
+    if not seen:
+        parent_soa = any(rrset.rdtype == dns.rdatatype.SOA and name.is_subdomain(rrset.name) and rrset.name != name
+                         for rrset in response.authority)
+        if response.rcode() == dns.rcode.NXDOMAIN or parent_soa:
+            return False, []
+        return None, []
+    expected = {item.lower() for item in (nameservers or configured_nameservers())}
     return expected <= seen, sorted(seen)
+
+
+def still_designated(active: bool | None, seen: list[str], nameservers: tuple[str, str]) -> bool | None:
+    """Délégation vue du côté de la suppression : None si inconnue, True dès qu'un serveur de l'instance
+    figure encore chez la parente (délégation partielle comprise), False seulement sinon."""
+    if active is None:
+        return None
+    return bool(active) or bool({item.lower() for item in nameservers} & {item.lower() for item in seen})
 
 
 VERIFY_LABEL = "_synunnel"

@@ -37,6 +37,7 @@ from .dns import (
     ownership_proof,
     relative_name,
     snapshot_records,
+    still_designated,
 )
 from .keys import generate_keypair
 
@@ -319,13 +320,18 @@ def domain_view(app: Flask, user_id: int, domain_id: int) -> dict:
             "nameservers": nameservers, "checked_at": domain["delegation_checked_at"]}
 
 
-def refresh_delegation(app: Flask, domain) -> None:
+def refresh_delegation(app: Flask, domain) -> tuple[bool | None, list[str]]:
+    """Relève la délégation, l'inscrit pour l'affichage et la renvoie. Un relevé commencé avant celui déjà
+    en base ne l'écrase pas : deux relevés concurrents laissent toujours le plus récent."""
     nameservers = (f"{app.config['NS1_HOST']}.", f"{app.config['NS2_HOST']}.")
+    started = int(time.time())
     active, parent_ns = delegation_status(domain["name"], nameservers)
     with get_db() as db:
-        db.execute("UPDATE domains SET delegation_active=?, delegation_ns=?, delegation_checked_at=? WHERE id=?",
-                   (None if active is None else int(active), ",".join(parent_ns)[:1000], int(time.time()),
-                    domain["id"]))
+        db.execute("UPDATE domains SET delegation_active=?, delegation_ns=?, delegation_checked_at=? "
+                   "WHERE id=? AND (delegation_checked_at IS NULL OR delegation_checked_at<=?)",
+                   (None if active is None else int(active), ",".join(parent_ns)[:1000], started,
+                    domain["id"], started))
+    return active, parent_ns
 
 
 # ---------------------------------------------------------------- domaines
@@ -558,13 +564,18 @@ def delete_domain(app: Flask, user_id: int | None, domain_id: int, guard: Guard 
     """Supprime un domaine et sa zone. Le propriétaire doit d'abord retirer ses adresses et rendre la
     délégation à son hébergeur ; l'administrateur (user_id None, force) passe outre, par exemple pour
     rendre un domaine à son vrai titulaire."""
+    designated = None
     if not force:
-        # Relevé de délégation à jour, hors verrou (requêtes DNS) : tant que la zone parente désigne encore
-        # l'instance, retirer la zone couperait le domaine entier, site et messagerie compris.
+        # Relevé de délégation propre à cette suppression, hors verrou (requêtes DNS) : tant que la zone
+        # parente désigne encore un serveur de l'instance, retirer la zone couperait le domaine entier,
+        # site et messagerie compris. La décision porte sur ce relevé-ci, jamais sur le cache partagé
+        # qu'un relevé concurrent peut réécrire entre-temps.
         current = (owned_domain(user_id, domain_id) if user_id is not None else
                    get_db().execute("SELECT * FROM domains WHERE id=?", (domain_id,)).fetchone())
         if current is not None:
-            refresh_delegation(app, current)
+            active, seen = refresh_delegation(app, current)
+            designated = still_designated(active, seen, (f"{app.config['NS1_HOST']}.",
+                                                         f"{app.config['NS2_HOST']}."))
     db = get_db()
     with db:
         _begin(db, guard)
@@ -576,11 +587,11 @@ def delete_domain(app: Flask, user_id: int | None, domain_id: int, guard: Guard 
             domain = owned_domain(user_id, domain_id)
         if not force and db.execute("SELECT 1 FROM addresses WHERE domain_id=?", (domain_id,)).fetchone():
             raise ActionError(409, "in_use", "Supprime d'abord les adresses de ce domaine.")
-        if not force and domain["delegation_active"] is None:
+        if not force and designated is None:
             raise ActionError(409, "delegation_unknown",
                               "Impossible de vérifier la délégation du domaine pour l'instant : réessaie dans "
                               "quelques minutes.")
-        if not force and domain["delegation_active"]:
+        if not force and designated:
             raise ActionError(409, "delegation_active",
                               "Ce domaine est encore délégué à cette instance : remets d'abord les serveurs de noms "
                               "de ton hébergeur chez ton registrar, puis réessaie une fois la délégation retirée.")
