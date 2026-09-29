@@ -11,6 +11,7 @@
       <label>Adresse mail<input type="email" name="email" autocomplete="email" required></label>
       <button class="button" type="submit">Envoyer le lien</button>
     </form>{% else %}<p>Cette instance n'envoie pas de mails : demande un ticket de récupération à l'administrateur.</p>{% endif %}
+    <p class="small legal-note">Ce que l'instance fait de ton adresse : <a href="{{ url_for('privacy_notice') }}">confidentialité</a> · <a href="{{ url_for('legal_notice') }}">mentions légales</a></p>
     <p class="small"><a href="{{ url_for('recover') }}">J'ai un ticket de récupération</a> · <a href="{{ url_for('login') }}">Se connecter</a></p>
   </div>
 </section>

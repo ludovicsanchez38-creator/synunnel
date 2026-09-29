@@ -17,6 +17,7 @@
       <label>Mot de passe<input type="password" name="password" autocomplete="current-password" required></label>
       <button class="button" type="submit">Se connecter</button>
     </form>
+    <p class="small legal-note">Ce que l'instance fait de ton adresse : <a href="{{ url_for('privacy_notice') }}">confidentialité</a> · <a href="{{ url_for('legal_notice') }}">mentions légales</a></p>
     <p class="small"><a href="{{ url_for('forgot') }}">Mot de passe oublié ?</a></p>
     {% if guest_codes %}<p class="small">Invité sans compte ? <a href="{{ url_for('guest_code', next=next_url) }}">Recevoir un code par mail</a></p>{% endif %}
     <p class="small">Pas encore de compte ? <a href="{{ url_for('register') }}">{% if invitation_mode %}J'ai un code d'invitation{% else %}Demander un accès{% endif %}</a></p>

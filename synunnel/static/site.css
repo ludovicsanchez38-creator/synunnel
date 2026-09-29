@@ -153,3 +153,10 @@ table td:last-child, table th:last-child { text-align: right; }
 .recovery-code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; background: var(--muted-bg); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; }
 .card form + form { margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--line); }
 .card h3 { font-size: 1rem; margin: 0 0 4px; }
+
+/* Mentions légales et notice de confidentialité de l'exploitant */
+.legal-note { margin-top: 12px !important; }
+.legal-text h2 { font-size: 17px; margin: 20px 0 8px; }
+.legal-text h2:first-child { margin-top: 0; }
+.legal-text h3, .legal-text h4 { font-size: 15px; margin: 16px 0 6px; }
+.legal-text ul { color: var(--sub); font-size: 14px; line-height: 1.6; padding-left: 20px; margin: 0 0 8px; }

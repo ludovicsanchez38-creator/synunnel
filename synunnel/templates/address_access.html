@@ -7,8 +7,8 @@
   <label class="check"><input type="checkbox" name="shared" value="1" {% if address.shared %}checked{% endif %}><span>Activer l'accès partagé</span></label>
   <label>Adresses mail autorisées <span class="hint">une par ligne ou séparées par une virgule</span><textarea name="emails" rows="7" autocomplete="off" spellcheck="false" placeholder="associe@exemple.fr">{{ emails|join('\n') }}</textarea></label>
   {% if guest_available %}<label class="check"><input type="checkbox" name="guest_codes" value="1" {% if address.guest_codes %}checked{% endif %}><span>Accès par code mail pour ces personnes, sans compte</span></label>
-  <p class="small">Chaque personne de la liste reçoit un code à 6 chiffres par mail. Un seul facteur : réserve-le aux services qui le supportent. Les personnes qui ont un compte Synunnel passent toujours par leur compte.</p>{% endif %}
-  <p class="small">Sans accès par code, aucune invitation n'est envoyée : chaque personne se connecte avec son compte Synunnel.</p>
+  <p class="small">Chaque personne de la liste peut alors demander elle-même un code à 6 chiffres, reçu par mail, sur la page de connexion du service. Un seul facteur : réserve-le aux services qui le supportent. Les personnes qui ont un compte Synunnel passent toujours par leur compte.</p>{% endif %}
+  <p class="small">Aucun mail n'est envoyé quand tu ajoutes une adresse : préviens toi-même les personnes que tu autorises, et dis-leur que leur adresse figure dans cette liste. Le mail du code, s'il est demandé, renvoie à la <a href="{{ url_for('privacy_notice') }}">notice de confidentialité</a> de l'instance.</p>
   <button class="button" type="submit">Enregistrer les accès</button>
 </form></section>
 {% endblock %}

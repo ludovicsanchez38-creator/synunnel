@@ -13,6 +13,7 @@
       <label>Mot de passe <span class="hint">12 caractères minimum</span><input type="password" name="password" minlength="12" autocomplete="new-password" required></label>
       <button class="button" type="submit">Créer mon compte</button>
     </form>
+    <p class="small legal-note">Ce que l'instance fait de ton adresse : <a href="{{ url_for('privacy_notice') }}">confidentialité</a> · <a href="{{ url_for('legal_notice') }}">mentions légales</a></p>
     <p class="small">Déjà inscrit ? <a href="{{ url_for('login') }}">Se connecter</a></p>
   </div>
 </section>

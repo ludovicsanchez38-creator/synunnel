@@ -42,8 +42,8 @@
   </main>
   <footer>
     <div class="shell">
-      <span>Synunnel {{ app_version }} · logiciel libre sous licence MIT</span>
-      <span>Un projet initié par <a href="https://synoptia.fr" rel="noopener">Synoptïa</a></span>
+      <span>Synunnel {{ app_version }} · logiciel libre sous licence MIT · <a href="{{ url_for('legal_notice') }}">Mentions légales</a> · <a href="{{ url_for('privacy_notice') }}">Confidentialité</a></span>
+      <span>{% if operator_name %}Instance exploitée par {{ operator_name }} · {% endif %}Un projet initié par <a href="https://synoptia.fr" rel="noopener">Synoptïa</a></span>
     </div>
   </footer>
 </body>

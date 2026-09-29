@@ -24,7 +24,7 @@ from flask import (
 from flask.sessions import SecureCookieSessionInterface
 from werkzeug.middleware.proxy_fix import ProxyFix
 
-from . import VERSION_LABEL, account, actions, api, guest, security
+from . import VERSION_LABEL, account, actions, api, guest, legal, security
 from .account import PASSWORDS
 from .db import allocate_id, close_db, get_db, init_db, now_iso
 from .dns import (
@@ -178,6 +178,12 @@ def create_app(config_override: dict | None = None) -> Flask:
         SMTP_USER=os.getenv("SMTP_USER", ""),
         SMTP_FROM=os.getenv("SMTP_FROM", ""),
         SMTP_PASSWORD_FILE=os.getenv("SMTP_PASSWORD_FILE", ""),
+        # Exploitant de l'instance : nom affiché, contact, mentions légales et notice de confidentialité
+        # (fichiers Markdown de l'exploitant, voir docs/modeles/).
+        OPERATOR_NAME=os.getenv("OPERATOR_NAME", ""),
+        ADMIN_CONTACT=os.getenv("ADMIN_CONTACT", ""),
+        LEGAL_FILE=os.getenv("LEGAL_FILE", ""),
+        PRIVACY_FILE=os.getenv("PRIVACY_FILE", ""),
         PDNS_ENABLED=True,
         SESSION_COOKIE_NAME="__Host-synunnel",
         SESSION_COOKIE_SECURE=True,
@@ -258,6 +264,8 @@ def create_app(config_override: dict | None = None) -> Flask:
         if "csrf" not in session:
             session["csrf"] = secrets.token_urlsafe(32)
         return {"csrf_token": session["csrf"], "current_user": g.get("user"), "app_version": VERSION_LABEL,
+                "operator_name": app.config["OPERATOR_NAME"], "admin_contact": app.config["ADMIN_CONTACT"],
+                "dashboard_host": app.config["DASHBOARD_HOST"],
                 "enrolling_user": g.get("enrolling"),
                 "invitation_mode": app.config["REGISTRATION_MODE"] != "approval"}
 
@@ -286,6 +294,15 @@ def create_app(config_override: dict | None = None) -> Flask:
                 db.commit()
             response.headers["Cache-Control"] = "no-store"
         return response
+
+    @app.get("/mentions-legales")
+    def legal_notice():
+        return render_template("legal.html", title="Mentions légales", content=legal.load(app.config["LEGAL_FILE"]))
+
+    @app.get("/confidentialite")
+    def privacy_notice():
+        return render_template("legal.html", title="Confidentialité",
+                               content=legal.load(app.config["PRIVACY_FILE"]))
 
     @app.get("/")
     def index():

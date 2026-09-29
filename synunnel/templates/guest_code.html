@@ -9,6 +9,7 @@
       <label>Adresse mail<input type="email" name="email" autocomplete="email" required autofocus></label>
       <button class="button" type="submit">Recevoir le code</button>
     </form>
+    <p class="small legal-note">Ce que l'instance fait de ton adresse : <a href="{{ url_for('privacy_notice') }}">confidentialité</a> · <a href="{{ url_for('legal_notice') }}">mentions légales</a></p>
   </div>
 </section>
 {% endblock %}

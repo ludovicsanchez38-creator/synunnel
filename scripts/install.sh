@@ -30,7 +30,8 @@ if [[ -e /etc/synunnel/synunnel.env ]]; then
 fi
 for setting in PUBLIC_IPV4 PUBLIC_IPV6 DASHBOARD_HOST NS1_HOST NS2_HOST ACME_EMAIL SOA_RNAME REDIRECT_HOSTS \
   RESERVED_DOMAINS MAX_DOMAINS_PER_USER MAX_MACHINES_PER_USER MAX_ADDRESSES_PER_USER MAX_RECORDS_PER_DOMAIN \
-  REQUIRE_2FA SMTP_HOST SMTP_PORT SMTP_USER SMTP_FROM SMTP_PASSWORD_FILE GUEST_CODES GUEST_CODES_WITH_2FA; do
+  REQUIRE_2FA SMTP_HOST SMTP_PORT SMTP_USER SMTP_FROM SMTP_PASSWORD_FILE GUEST_CODES GUEST_CODES_WITH_2FA \
+  OPERATOR_NAME ADMIN_CONTACT LEGAL_FILE PRIVACY_FILE; do
   if [[ "${!setting:-}" == *[$'\n\r']* ]]; then
     printf '%s ne doit pas contenir de retour à la ligne.\n' "$setting" >&2
     exit 1
@@ -72,15 +73,40 @@ for flag in REQUIRE_2FA GUEST_CODES GUEST_CODES_WITH_2FA; do
     exit 1
   fi
 done
+MAIL_RE='^[A-Za-z0-9._+-]+@[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$'
+# Exploitant de l'instance, affiché en pied de page et dans le mail des invités, et ses deux textes
+# (Markdown, modèles dans docs/modeles/) : mentions légales et notice de confidentialité.
+OPERATOR_NAME="${OPERATOR_NAME:-}"
+ADMIN_CONTACT="${ADMIN_CONTACT:-}"
+LEGAL_FILE="${LEGAL_FILE:-}"
+PRIVACY_FILE="${PRIVACY_FILE:-}"
+# Le nom est écrit entre apostrophes droites dans le fichier d'environnement, que bash et systemd relisent :
+# ni apostrophe droite (l'apostrophe typographique ’ convient), ni guillemet, ni barre oblique inverse, ni $ ni `.
+if (( ${#OPERATOR_NAME} > 120 )) || [[ "$OPERATOR_NAME" == *[\'\"\\\$\`]* ]]; then
+  printf "OPERATOR_NAME : 120 caractères au plus, sans apostrophe droite (utilise ’), guillemet, \\, \$ ni \`.\n" >&2
+  exit 1
+fi
+if [[ -n "$ADMIN_CONTACT" && ! "$ADMIN_CONTACT" =~ $MAIL_RE ]]; then
+  printf 'ADMIN_CONTACT doit être une adresse mail.\n' >&2
+  exit 1
+fi
+# Les fichiers que l'installateur remet à root:synunnel en 0640 restent dans /etc/synunnel/ : une faute de
+# frappe ne peut pas changer les droits d'un fichier système.
+for file_setting in SMTP_PASSWORD_FILE LEGAL_FILE PRIVACY_FILE; do
+  if [[ -n "${!file_setting}" && ( ! "${!file_setting}" =~ ^/etc/synunnel/[A-Za-z0-9._-]+$ \
+        || "${!file_setting}" == /etc/synunnel/synunnel.env || "${!file_setting}" == */.* ) ]]; then
+    printf '%s doit désigner un fichier de /etc/synunnel/ (autre que synunnel.env).\n' "$file_setting" >&2
+    exit 1
+  fi
+done
 if [[ "$SMTP_PORT" != 465 ]]; then
   printf 'SMTP_PORT vaut 465 : seul SMTPS (TLS implicite) est pris en charge.\n' >&2
   exit 1
 fi
-MAIL_RE='^[A-Za-z0-9._+-]+@[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$'
 SMTP_HOST_RE='^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$'
 if [[ -n "$SMTP_HOST$SMTP_USER$SMTP_FROM$SMTP_PASSWORD_FILE" ]]; then
   if [[ ! "$SMTP_HOST" =~ $SMTP_HOST_RE || ! "$SMTP_USER" =~ $MAIL_RE || ! "$SMTP_FROM" =~ $MAIL_RE \
-        || ! "$SMTP_PASSWORD_FILE" =~ ^/[A-Za-z0-9._/-]+$ ]]; then
+        || -z "$SMTP_PASSWORD_FILE" ]]; then
     printf 'SMTP : SMTP_HOST, SMTP_USER, SMTP_FROM et SMTP_PASSWORD_FILE vont ensemble et doivent être valides.\n' >&2
     exit 1
   fi
@@ -205,6 +231,10 @@ SMTP_FROM=$SMTP_FROM
 SMTP_PASSWORD_FILE=$SMTP_PASSWORD_FILE
 GUEST_CODES=$GUEST_CODES
 GUEST_CODES_WITH_2FA=$GUEST_CODES_WITH_2FA
+OPERATOR_NAME='$OPERATOR_NAME'
+ADMIN_CONTACT=$ADMIN_CONTACT
+LEGAL_FILE=$LEGAL_FILE
+PRIVACY_FILE=$PRIVACY_FILE
 SYNC_COMMAND='/usr/bin/sudo -n /usr/local/sbin/synunnel-sync'
 EOF
 fi
@@ -217,9 +247,10 @@ fi
 for setting in PUBLIC_IPV4 PUBLIC_IPV6 DASHBOARD_HOST NS1_HOST NS2_HOST SOA_RNAME REDIRECT_HOSTS ACME_EMAIL \
   RESERVED_DOMAINS MAX_DOMAINS_PER_USER MAX_MACHINES_PER_USER MAX_ADDRESSES_PER_USER MAX_RECORDS_PER_DOMAIN \
   REGISTRATION_MODE REQUIRE_2FA SMTP_HOST SMTP_PORT SMTP_USER SMTP_FROM SMTP_PASSWORD_FILE GUEST_CODES \
-  GUEST_CODES_WITH_2FA; do
+  GUEST_CODES_WITH_2FA OPERATOR_NAME ADMIN_CONTACT LEGAL_FILE PRIVACY_FILE; do
   if ! grep -q "^${setting}=" /etc/synunnel/synunnel.env; then
-    printf '%s=%s\n' "$setting" "${!setting}" >> /etc/synunnel/synunnel.env
+    # Entre apostrophes : toutes les valeurs validées plus haut en sont exemptes.
+    printf "%s='%s'\n" "$setting" "${!setting}" >> /etc/synunnel/synunnel.env
   fi
 done
 chown root:synunnel /etc/synunnel/synunnel.env
@@ -233,6 +264,27 @@ if [[ -n "$SMTP_PASSWORD_FILE" ]]; then
   chown root:synunnel "$SMTP_PASSWORD_FILE"
   chmod 0640 "$SMTP_PASSWORD_FILE"
 fi
+# Mentions légales et notice de confidentialité : lisibles par le service, modifiables par root seul.
+# Absentes, les deux pages publiques le disent : l'exploitant doit les publier avant d'ouvrir l'instance.
+for identity_setting in OPERATOR_NAME ADMIN_CONTACT; do
+  if [[ -z "${!identity_setting}" ]]; then
+    printf "Avertissement : %s non renseigné, le pied de page et le mail des invités ne nomment pas l'exploitant.\n" "$identity_setting" >&2
+  fi
+done
+for file_setting in LEGAL_FILE PRIVACY_FILE; do
+  legal_path="${!file_setting}"
+  if [[ -z "$legal_path" ]]; then
+    printf 'Avertissement : %s non renseigné, la page correspondante indique « pas encore publié » (modèle dans docs/modeles/).\n' "$file_setting" >&2
+  elif [[ -L "$legal_path" || ( -e "$legal_path" && ! -f "$legal_path" ) ]]; then
+    printf '%s doit être un fichier ordinaire.\n' "$legal_path" >&2
+    exit 1
+  elif [[ ! -e "$legal_path" ]]; then
+    printf 'Avertissement : %s absent, la page correspondante indique « pas encore publié ».\n' "$legal_path" >&2
+  else
+    chown root:synunnel "$legal_path"
+    chmod 0640 "$legal_path"
+  fi
+done
 set -a
 # Fichier généré par ce script, possédé par root.
 source /etc/synunnel/synunnel.env

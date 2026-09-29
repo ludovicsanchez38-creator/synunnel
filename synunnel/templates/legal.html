@@ -1,0 +1,8 @@
+{% extends "base.html" %}
+{% block title %}{{ title }}{% endblock %}
+{% block content %}
+<section class="page-head"><span class="eyebrow">{{ operator_name or "Cette instance" }}</span><h1>{{ title }}</h1></section>
+<section class="card legal-text">
+  {% if content %}{{ content }}{% else %}<p>L'exploitant de cette instance n'a pas encore publié ce texte.{% if admin_contact %} Pour toute question : <a href="mailto:{{ admin_contact }}">{{ admin_contact }}</a>.{% endif %}</p>{% endif %}
+</section>
+{% endblock %}

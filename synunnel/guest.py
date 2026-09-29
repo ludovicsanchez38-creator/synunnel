@@ -65,6 +65,22 @@ def _now() -> float:
     return time.time()
 
 
+def guest_mail_body(hostname: str, code: str) -> str:
+    """Mail du code invité : le code, puis qui écrit, pourquoi, et comment ne plus en recevoir."""
+    dashboard = current_app.config["DASHBOARD_HOST"]
+    operator = current_app.config.get("OPERATOR_NAME") or f"l'administrateur de {dashboard}"
+    contact = current_app.config.get("ADMIN_CONTACT")
+    removal = (f"demande-le à la personne qui t'a invité ou écris à {contact}" if contact
+               else "demande-le à la personne qui t'a invité")
+    return (f"Bonjour,\n\nVoici ton code d'accès à {hostname} : {code}\n\n"
+            "Il est valable 10 minutes et ne sert qu'une fois. Saisis-le sur la page qui te l'a demandé.\n\n"
+            "Si tu n'as rien demandé, ignore ce mail.\n\n"
+            f"Pourquoi ce mail : le propriétaire de {hostname} a inscrit ton adresse parmi les personnes autorisées, "
+            f"et un code vient d'être demandé pour elle. Ce service passe par l'instance Synunnel {dashboard}, "
+            f"exploitée par {operator}. Ce que l'instance fait de ton adresse : https://{dashboard}/confidentialite\n\n"
+            f"Pour ne plus figurer dans la liste, {removal}.\n\nSynunnel")
+
+
 def instance_allows(app: Flask | None = None) -> bool:
     """Politique d'instance : SMTP configuré, option d'instance, et 2FA exigée seulement si l'administrateur
     l'autorise explicitement pour les invités (un invité n'a qu'un facteur, sa boîte mail)."""
@@ -226,12 +242,8 @@ def register(app: Flask) -> None:
             record_event(db, None, "guest.request", via=f"{address['hostname']} {email}", actor="guest")
         session["guest_challenge"] = challenge
         if real:
-            mailer().enqueue(
-                email, f"Ton code d'accès à {address['hostname']}",
-                f"Bonjour,\n\nVoici ton code d'accès à {address['hostname']} : {code}\n\n"
-                "Il est valable 10 minutes et ne sert qu'une fois. Saisis-le sur la page qui te l'a demandé.\n\n"
-                "Si tu n'as rien demandé, ignore ce mail.\n\nSynunnel",
-            )
+            mailer().enqueue(email, f"Ton code d'accès à {address['hostname']}",
+                             guest_mail_body(address["hostname"], code))
         return redirect(url_for("guest_verify"))
 
     @app.route("/access/verify", methods=["GET", "POST"])

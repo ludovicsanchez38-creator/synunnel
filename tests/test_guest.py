@@ -115,7 +115,9 @@ def test_guest_receives_a_code_and_enters(app, mails, clock):
     assert [message["To"] for message in mails] == [GUEST]
     assert mails[0]["Subject"] == f"Ton code d'accès à {HOST}"
     body = mails[0].get_content()
-    assert "https://" not in body and "Si tu n'as rien demandé, ignore ce mail." in body
+    # Aucun lien qui ouvrirait l'accès : le seul lien est celui de la notice de confidentialité de l'instance.
+    assert re.findall(r"https://\S+", body) == ["https://synunnel.fr/confidentialite"]
+    assert "Si tu n'as rien demandé, ignore ce mail." in body
     browser = enter(app, visitor, codes_in(mails)[0])
     cookie = browser.get_cookie("__Host-synunnel-access", domain=HOST)
     assert cookie is not None and cookie.secure and cookie.http_only
