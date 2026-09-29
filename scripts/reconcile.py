@@ -19,6 +19,8 @@ from synunnel.dns import delegation_status, still_designated
 
 RETENTION_DAYS = 90
 BUDGET_SECONDS = 200
+# Part du budget réservée aux retraits de zones : le reste revient aux zones actives, quoi qu'il arrive.
+REMOVAL_BUDGET_SECONDS = 60
 
 
 def main() -> int:
@@ -52,14 +54,24 @@ def main() -> int:
         if not project_runtime(app):
             failures += 1
             print("Synchronisation WireGuard et Caddy en échec.", file=sys.stderr)
-        # 3. Zones de domaines supprimés, pas encore retirées de PowerDNS, dans le budget.
+        # 3. Zones de domaines supprimés, pas encore retirées de PowerDNS, dans un sous-budget et en commençant
+        #    chaque fois ailleurs : des relevés qui traînent ne privent jamais les zones actives de leur temps.
         nameservers = (f"{app.config['NS1_HOST']}.", f"{app.config['NS2_HOST']}.")
-        for row in db.execute("SELECT name FROM zone_removals ORDER BY at").fetchall():
-            if time.monotonic() - started > BUDGET_SECONDS:
+        removals = db.execute("SELECT name, forced FROM zone_removals ORDER BY at, name").fetchall()
+        if removals:
+            offset = int(time.time() // 300) % len(removals)
+            removals = removals[offset:] + removals[:offset]
+        removals_started = time.monotonic()
+        for row in removals:
+            if time.monotonic() - removals_started > REMOVAL_BUDGET_SECONDS:
+                print("Budget des retraits atteint : les suivants passeront au prochain rapprochement.",
+                      file=sys.stderr)
                 break
-            # Retrait rejoué après un échec : la délégation a pu revenir vers l'instance entre-temps. Une zone
-            # encore désignée, ou dont la délégation ne se vérifie pas, est gardée et revue au passage suivant.
-            if still_designated(*delegation_status(row["name"], nameservers), nameservers) is not False:
+            # Retrait rejoué après un échec : pour le titulaire, la délégation a pu revenir vers l'instance
+            # entre-temps ; une zone encore désignée, ou dont la délégation ne se vérifie pas, est gardée et
+            # revue au passage suivant. Le retrait forcé par l'administrateur, lui, va jusqu'au bout.
+            if not row["forced"] and still_designated(*delegation_status(row["name"], nameservers),
+                                                      nameservers) is not False:
                 print(f"Zone {row['name']} gardée : la délégation désigne encore l'instance ou ne se vérifie pas.",
                       file=sys.stderr)
                 continue

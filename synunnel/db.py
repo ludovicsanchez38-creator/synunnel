@@ -130,7 +130,8 @@ CREATE TABLE IF NOT EXISTS invitations (
 );
 CREATE TABLE IF NOT EXISTS zone_removals (
     name TEXT PRIMARY KEY,
-    at TEXT NOT NULL
+    at TEXT NOT NULL,
+    forced INTEGER NOT NULL DEFAULT 0 CHECK(forced IN (0, 1))
 );
 CREATE TABLE IF NOT EXISTS id_counters (
     name TEXT PRIMARY KEY,
@@ -325,6 +326,9 @@ def init_db() -> None:
     for column in ("delegation_active INTEGER", "delegation_ns TEXT", "delegation_checked_at INTEGER"):
         if column.split()[0] not in domain_columns:
             db.execute(f"ALTER TABLE domains ADD COLUMN {column}")
+    if "forced" not in {row[1] for row in db.execute("PRAGMA table_info(zone_removals)")}:
+        # Retrait forcé par l'administrateur : repris jusqu'au bout après un échec PowerDNS.
+        db.execute("ALTER TABLE zone_removals ADD COLUMN forced INTEGER NOT NULL DEFAULT 0 CHECK(forced IN (0, 1))")
     if "domain_id" not in {row[1] for row in db.execute("PRAGMA table_info(domain_claims)")}:
         db.execute("ALTER TABLE domain_claims ADD COLUMN domain_id INTEGER")
     for table in ("users", "access_codes", "host_sessions"):

@@ -261,3 +261,85 @@ def test_complete_only_when_every_parent_lists_every_instance_server(parent):
                            "149.112.112.112": _response(authority=[(DOMAIN, "NS", OURS[1])])}
     status, seen = synunnel_dns.delegation_status("client.example", OURS)
     assert status is False and synunnel_dns.still_designated(status, seen, OURS) is True
+
+
+def _run_reconcile(app, monkeypatch, **overrides):
+    import runpy
+    from pathlib import Path
+
+    monkeypatch.setattr("synunnel.create_app", lambda: app)
+    reconcile = runpy.run_path(str(Path(__file__).resolve().parent.parent / "scripts/reconcile.py"))
+    glob = reconcile["main"].__globals__
+    monkeypatch.setitem(glob, "create_app", lambda: app)
+    monkeypatch.setitem(glob, "project_runtime", lambda _app: True)
+    for key, value in overrides.items():
+        monkeypatch.setitem(glob, key, value)
+    reconcile["main"]()
+    return glob
+
+
+def test_forced_admin_removal_is_completed_even_while_still_delegated(app, monkeypatch):
+    """Troisième passe Codex, constat 16 : après un échec PowerDNS, la reprise perdait le caractère forcé du
+    retrait décidé par l'administrateur et gardait la zone tant qu'elle était déléguée."""
+    from synunnel.db import get_db, init_db
+
+    client = app.test_client()
+    register_approve_login(app, client, "forcee@example.org")
+    add_domain(client, "forcee.example")
+    monkeypatch.setattr("synunnel.actions.remove_zone", lambda app_, name: False)  # PowerDNS en échec
+    reply = client.post("/admin/api/domains/delete", json={"name": "forcee.example"},
+                        headers={"Authorization": "Bearer test-admin-token-only"})
+    assert reply.status_code == 200 and reply.json["synced"] is False
+    monkeypatch.undo()
+    with app.app_context():
+        init_db()
+        db = get_db()
+        assert db.execute("SELECT forced FROM zone_removals WHERE name='forcee.example'").fetchone()[0] == 1
+        with db:
+            db.execute("INSERT INTO zone_removals(name,at) VALUES('normale.example','2026-09-29T00:00:00')")
+    _run_reconcile(app, monkeypatch, delegation_status=lambda domain, ns: (True, list(OURS)))
+    with app.app_context():
+        names = {row[0] for row in get_db().execute("SELECT name FROM zone_removals")}
+    assert names == {"normale.example"}
+
+
+def test_pending_removals_cannot_starve_the_active_zones(app, monkeypatch):
+    """Troisième passe Codex, constat 17 : des retraits dont les relevés traînent consommaient tout le budget
+    du rapprochement, sans qu'aucune zone active ne soit projetée."""
+    import time as real_time
+
+    from synunnel.db import get_db, init_db
+
+    client = app.test_client()
+    register_approve_login(app, client, "active@example.org")
+    add_domain(client, "active.example")
+    with app.app_context():
+        init_db()
+        db = get_db()
+        with db:
+            for index in range(30):
+                db.execute("INSERT INTO zone_removals(name,at) VALUES(?,'2026-09-29T00:00:00')",
+                           (f"retrait{index}.example",))
+    clock = {"now": 0.0}
+
+    class VirtualTime:
+        @staticmethod
+        def monotonic():
+            return clock["now"]
+
+        @staticmethod
+        def time():
+            return real_time.time()
+
+    checks, projected = [], []
+
+    def slow_status(domain, ns):
+        clock["now"] += 10  # quatre serveurs parents injoignables : chaque relevé traîne
+        checks.append(domain)
+        return None, []
+
+    glob = _run_reconcile(app, monkeypatch, time=VirtualTime, delegation_status=slow_status,
+                          project_zone=lambda app_, domain: projected.append(domain["name"]) or True,
+                          refresh_delegation=lambda app_, domain: None)
+    assert projected == ["active.example"]
+    assert len(checks) <= glob["REMOVAL_BUDGET_SECONDS"] // 10 + 1

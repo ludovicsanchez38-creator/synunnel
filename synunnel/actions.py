@@ -601,7 +601,8 @@ def delete_domain(app: Flask, user_id: int | None, domain_id: int, guard: Guard 
             db.execute("DELETE FROM access_codes WHERE hostname=?", (hostname,))
         db.execute("DELETE FROM domain_claims WHERE domain_id=?", (domain_id,))
         db.execute("DELETE FROM domains WHERE id=?", (domain_id,))
-        db.execute("INSERT OR REPLACE INTO zone_removals(name, at) VALUES(?,?)", (domain["name"], now_iso()))
+        db.execute("INSERT OR REPLACE INTO zone_removals(name, at, forced) VALUES(?,?,?)",
+                   (domain["name"], now_iso(), int(force)))
         if audit:
             audit(db, "domain.delete", f"domain:{domain_id} {domain['name']}")
     synced = remove_zone(app, domain["name"])
