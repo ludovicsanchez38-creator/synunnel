@@ -35,8 +35,8 @@ Les deux serveurs de noms désignent ici la même machine. Certains registrars, 
 ## Installation
 
 ```bash
-git clone <adresse du dépôt> synunnel
-cd synunnel
+sudo git clone <adresse du dépôt> /opt/synunnel
+cd /opt/synunnel
 sudo env PUBLIC_IPV4=203.0.113.10 \
   DASHBOARD_HOST=tunnel.example.org \
   NS1_HOST=ns1.example.org NS2_HOST=ns2.example.org \
@@ -46,7 +46,7 @@ sudo env PUBLIC_IPV4=203.0.113.10 \
 
 Paramètres facultatifs : `PUBLIC_IPV6`, `SOA_RNAME` (par défaut `hostmaster.<DASHBOARD_HOST>.`), `REDIRECT_HOSTS` (noms supplémentaires redirigés vers le tableau de bord, séparés par des virgules), `RESERVED_DOMAINS` (domaines que les comptes ne pourront pas revendiquer), `MAX_DOMAINS_PER_USER` et `MAX_MACHINES_PER_USER`.
 
-Le script vérifie les paramètres avant de toucher à la machine, installe les paquets, crée les secrets dans `/etc/synunnel/synunnel.env` (hors du dépôt), configure PowerDNS, Caddy, WireGuard et un pare-feu dédié au tunnel, puis démarre les services. On peut le relancer sans renouveler les secrets : les valeurs déjà enregistrées font foi.
+Le dépôt peut vivre ailleurs (le service est généré pour son emplacement réel), mais `/opt/synunnel` évite de modifier les droits d'un répertoire personnel. Le script vérifie les paramètres avant de toucher à la machine, installe les paquets, crée les secrets dans `/etc/synunnel/synunnel.env` (hors du dépôt), configure PowerDNS, Caddy, WireGuard et un pare-feu dédié au tunnel, puis démarre les services. On peut le relancer sans renouveler les secrets : les valeurs déjà enregistrées font foi. Pour changer un réglage ensuite, modifiez `/etc/synunnel/synunnel.env`, puis relancez le script ou `sudo systemctl restart synunnel`.
 
 UFW reçoit les règles des ports publics mais **n'est pas activé** par le script, pour ne pas couper votre accès SSH. Pour l'activer : `sudo ufw allow 22/tcp && sudo ufw enable` (adaptez le port SSH). Le tunnel, lui, est filtré dans tous les cas par sa propre table nftables.
 
@@ -54,7 +54,7 @@ Ensuite, créez votre compte sur `https://tunnel.example.org/register` et approu
 
 ## Utilisation
 
-**Ajouter un domaine.** Indiquez le domaine et, si votre messagerie en utilise, les sélecteurs DKIM qui ne sont pas standards. Synunnel affiche un enregistrement TXT `_synunnel.mondomaine.fr` à créer chez votre hébergeur DNS **actuel**. Au clic sur « Vérifier », il interroge directement les serveurs de votre domaine ; si la preuve est là, il crée la zone et y recopie les enregistrements publics (A, AAAA, MX, TXT et CAA de la racine, `www`, `_dmarc`, les sélecteurs DKIM courants et ceux indiqués).
+**Ajouter un domaine.** Indiquez le domaine (une zone DNS existante, pas un simple nom à l'intérieur d'une zone) et, si votre messagerie en utilise, les sélecteurs DKIM qui ne sont pas standards. Synunnel affiche un enregistrement TXT `_synunnel.mondomaine.fr` à créer chez votre hébergeur DNS **actuel**. Au clic sur « Vérifier », il interroge directement les serveurs de votre domaine ; si la preuve est là, il crée la zone et y recopie les enregistrements publics (A, AAAA, MX, TXT et CAA de la racine, `www`, `_dmarc`, les sélecteurs DKIM courants et ceux indiqués).
 
 **Vérifier avant de déléguer.** Le DNS public ne révèle ni tous les sous-domaines ni tous les sélecteurs DKIM. Comparez la zone affichée à l'export complet de votre hébergeur actuel et ajoutez ce qui manque avant de changer les serveurs de noms chez votre registrar : une omission peut interrompre votre messagerie. Retirez aussi un éventuel enregistrement DS (DNSSEC), que Synunnel ne gère pas encore.
 
