@@ -209,6 +209,9 @@ def create_app(config_override: dict | None = None) -> Flask:
         app.config["EXTRA_RESERVED_DOMAINS"].split(","),
     )
     app.extensions["synunnel_mailer"] = Mailer(app.config, lambda: app.config.get("MAIL_TRANSPORT"))
+    if app.config["SMTP_HOST"] and not app.extensions["synunnel_mailer"].configured:
+        app.logger.warning("SMTP configuré mais inutilisable (réglages ou fichier du mot de passe illisible) : "
+                           "aucun mail ne partira.")
     app.session_interface = SessionInterface()
     app.wsgi_app = ProxyFix(app.wsgi_app, x_proto=1, x_host=1)
     api.register(app)

@@ -54,7 +54,7 @@ sudo env SMTP_HOST=smtp.example.org SMTP_USER=noreply@example.org SMTP_FROM=nore
   SMTP_PASSWORD_FILE=/etc/synunnel/smtp-password ./scripts/install.sh
 ```
 
-Le script ne lit jamais ce fichier : il en fixe seulement les droits (root:synunnel, 0640). Publiez SPF, DKIM et DMARC pour le domaine d'envoi chez son hébergeur DNS. Sans ces réglages, le mot de passe oublié passe par un ticket de l'administrateur.
+Si `/etc/synunnel/synunnel.env` contient déjà des lignes `SMTP_*` (même vides), ce sont elles qui font foi : renseignez-les dans ce fichier, puis relancez le script. Le script ne lit jamais le fichier du mot de passe : il en fixe seulement les droits (root:synunnel, 0640). Publiez SPF, DKIM et DMARC pour le domaine d'envoi chez son hébergeur DNS. Sans ces réglages, le mot de passe oublié passe par un ticket de l'administrateur.
 
 Le dépôt peut vivre ailleurs (le service est généré pour son emplacement réel), mais `/opt/synunnel` évite de modifier les droits d'un répertoire personnel. Le script vérifie les paramètres avant de toucher à la machine, installe les paquets, crée les secrets dans `/etc/synunnel/synunnel.env` (hors du dépôt), configure PowerDNS, Caddy, WireGuard et un pare-feu dédié au tunnel, puis démarre les services. On peut le relancer sans renouveler les secrets : les valeurs déjà enregistrées font foi. Pour changer un réglage ensuite, modifiez `/etc/synunnel/synunnel.env`, puis relancez le script ou `sudo systemctl restart synunnel`.
 
