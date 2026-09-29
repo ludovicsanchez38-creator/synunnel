@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+{% block title %}Jetons d'API{% endblock %}
+{% block content %}
+<section class="page-head"><a class="back" href="{{ url_for('dashboard') }}">← Tableau de bord</a><span class="eyebrow">API pour agents</span><h1>Jetons d'API</h1><p>Un jeton permet à un agent d'agir sur ce compte par l'API. Il peut toujours tout consulter ; tu choisis ce qu'il peut modifier. Une machine se déclare avec sa seule clé publique : la clé privée est générée sur la machine et ne passe jamais par l'API.</p></section>
+<div class="list-grid">
+  <section class="card"><h2>Créer un jeton</h2>
+    <form method="post" action="{{ url_for('create_token') }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <label>Nom <span class="hint">pour le reconnaître, par exemple le nom de l'agent</span><input name="name" maxlength="60" required></label>
+      <fieldset class="permissions"><legend>Il peut modifier</legend>{% for key, label in permissions.items() %}<label class="check"><input type="checkbox" name="permissions" value="{{ key }}" checked><span>{{ label }}</span></label>{% endfor %}<p class="small">Tout décocher donne un jeton en lecture seule.</p></fieldset>
+      <label>Durée<select name="days" required>{% for days in durations %}<option value="{{ days }}"{% if days == 30 %} selected{% endif %}>{{ days }} jours</option>{% endfor %}</select></label>
+      <label>Ton mot de passe <span class="hint">redemandé à chaque création</span><input type="password" name="password" autocomplete="current-password" required></label>
+      <button class="button" type="submit">Créer le jeton</button>
+    </form>
+  </section>
+  <section class="card"><h2>Utilisation</h2>
+    <p>Adresse de l'API, la seule à laquelle envoyer le jeton :</p><div class="code-line">{{ api_base }}</div>
+    <p>Description complète pour un agent :</p><div class="code-line">{{ api_base }}/openapi.json</div>
+    <p class="small">Les adresses publiées refusent toute requête qui porte un jeton Synunnel : une erreur d'adresse ne le transmet jamais à un service.</p>
+  </section>
+</div>
+<section class="card wide"><h2>Jetons du compte</h2>{% if tokens %}<div class="table-wrap"><table><thead><tr><th>Nom</th><th>Début du jeton</th><th>Peut modifier</th><th>Expire</th><th>Dernier usage</th><th>État</th><th></th></tr></thead><tbody>{% for token in tokens %}<tr><td><strong>{{ token.name }}</strong></td><td class="record-content">{{ token.prefix }}…</td><td>{{ token.labels | join(', ') if token.labels else 'Lecture seule' }}</td><td>{{ (token.expires_at - now) // 86400 if token.expires_at > now else 0 }} j</td><td>{{ 'jamais' if not token.last_used_at else ('il y a ' ~ ((now - token.last_used_at) // 60) ~ ' min') }}</td><td>{% if token.revoked_at %}Révoqué{% elif token.expires_at <= now %}Expiré{% else %}Actif{% endif %}</td><td>{% if not token.revoked_at and token.expires_at > now %}<form method="post" action="{{ url_for('revoke_token', token_id=token.id) }}"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="quiet" type="submit">Révoquer</button></form>{% endif %}</td></tr>{% endfor %}</tbody></table></div>
+  <form method="post" action="{{ url_for('revoke_all_tokens') }}"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="text-button" type="submit">Révoquer tous les jetons</button></form>{% else %}<p class="empty">Aucun jeton pour le moment.</p>{% endif %}</section>
+{% endblock %}

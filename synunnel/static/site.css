@@ -97,6 +97,9 @@ form.inline { display: inline; margin: 0; }
 .features li { display: flex; gap: 10px; align-items: flex-start; color: var(--sub); font-size: 14px; line-height: 1.5; }
 .features svg { flex: none; margin-top: 2px; }
 
+.permissions { border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; margin: 0; display: grid; gap: 8px; }
+.permissions legend { font-size: 13px; font-weight: 600; padding: 0 4px; }
+
 /* Messages */
 .notice { padding: 12px 14px; border: 1px solid var(--line-strong); background: var(--muted-bg); border-radius: 8px; margin-bottom: 20px; font-size: 14px; }
 .notice.error { color: var(--err); border-color: var(--err-line); background: var(--err-bg); }

@@ -24,9 +24,10 @@ from flask import (
     session,
     url_for,
 )
+from flask.sessions import SecureCookieSessionInterface
 from werkzeug.middleware.proxy_fix import ProxyFix
 
-from . import VERSION_LABEL, actions
+from . import VERSION_LABEL, actions, api
 from .db import close_db, get_db, init_db, now_iso
 from .dns import (
     system_reservations,
@@ -37,6 +38,7 @@ EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 ACCESS_COOKIE = "__Host-synunnel-access"
 # Vérifié quand le compte n'existe pas : même coût qu'une vraie tentative.
 DUMMY_HASH = PASSWORDS.hash(secrets.token_hex(16))
+PENDING = " La mise en service se termine automatiquement dans quelques minutes."
 REQUIRED_SETTINGS = ("PUBLIC_IPV4", "WG_ENDPOINT", "DASHBOARD_HOST", "NS1_HOST", "NS2_HOST")
 
 
@@ -115,6 +117,15 @@ def _redirect_after_login(next_url: str, user_id: int):
     return redirect(f"https://{hostname}/__synunnel/auth/callback?code={quote(code)}")
 
 
+class SessionInterface(SecureCookieSessionInterface):
+    """Aucune session sur l'API : ni lecture ni renouvellement du cookie du tableau de bord."""
+
+    def open_session(self, app, request):
+        if request.path.startswith("/api/"):
+            return self.null_session_class()
+        return super().open_session(app, request)
+
+
 def create_app(config_override: dict | None = None) -> Flask:
     app = Flask(__name__)
     app.config.update(
@@ -134,6 +145,8 @@ def create_app(config_override: dict | None = None) -> Flask:
         EXTRA_RESERVED_DOMAINS=os.getenv("RESERVED_DOMAINS", ""),
         MAX_DOMAINS_PER_USER=int(os.getenv("MAX_DOMAINS_PER_USER", "20")),
         MAX_MACHINES_PER_USER=int(os.getenv("MAX_MACHINES_PER_USER", "10")),
+        MAX_ADDRESSES_PER_USER=int(os.getenv("MAX_ADDRESSES_PER_USER", "50")),
+        MAX_RECORDS_PER_DOMAIN=int(os.getenv("MAX_RECORDS_PER_DOMAIN", "200")),
         SYNC_COMMAND=os.getenv("SYNC_COMMAND", "/usr/bin/sudo -n /usr/local/sbin/synunnel-sync"),
         PDNS_ENABLED=True,
         SESSION_COOKIE_NAME="__Host-synunnel",
@@ -155,7 +168,9 @@ def create_app(config_override: dict | None = None) -> Flask:
          *app.config["REDIRECT_HOSTS"].split(",")],
         app.config["EXTRA_RESERVED_DOMAINS"].split(","),
     )
+    app.session_interface = SessionInterface()
     app.wsgi_app = ProxyFix(app.wsgi_app, x_proto=1, x_host=1)
+    api.register(app)
     app.teardown_appcontext(close_db)
     with app.app_context():
         init_db()
@@ -163,6 +178,9 @@ def create_app(config_override: dict | None = None) -> Flask:
     @app.before_request
     def before_request():
         g.user = None
+        if request.path.startswith("/api/"):
+            # L'API s'authentifie par jeton uniquement : ni cookie ni jeton CSRF ici.
+            return
         if "user_id" in session:
             # La version de session change à chaque déconnexion : les autres navigateurs
             # connectés au même compte perdent alors leur session.
@@ -195,6 +213,8 @@ def create_app(config_override: dict | None = None) -> Flask:
         )
         if request.is_secure:
             response.headers["Strict-Transport-Security"] = "max-age=31536000"
+        if request.path.startswith("/api/"):
+            response.headers["Cache-Control"] = "no-store"
         if request.path.startswith("/admin/api/"):
             target = request.view_args.get("user_id") if request.view_args else None
             db = get_db()
@@ -293,7 +313,7 @@ def create_app(config_override: dict | None = None) -> Flask:
     def add_domain():
         raw_selectors = request.form.get("selectors", "").replace(";", ",").split(",")
         try:
-            claim = actions.create_claim(app, g.user["id"], request.form.get("domain", ""), raw_selectors,
+            claim, _created = actions.create_claim(app, g.user["id"], request.form.get("domain", ""), raw_selectors,
                                          bool(request.form.get("mail_checked")))
         except actions.ActionError as exc:
             _flash_error(exc)
@@ -325,13 +345,13 @@ def create_app(config_override: dict | None = None) -> Flask:
     @_login_required
     def verify_claim(claim_id: int):
         try:
-            domain_id, copied = actions.verify_claim(app, g.user["id"], claim_id)
+            result = actions.verify_claim(app, g.user["id"], claim_id)
         except actions.ActionError as exc:
             _flash_error(exc)
             return redirect(url_for("claim_detail", claim_id=claim_id))
-        flash(f"Domaine vérifié. Zone créée avec {copied} enregistrements repris. Vérifie-la avant délégation.",
-              "success")
-        return redirect(url_for("domain_detail", domain_id=domain_id))
+        flash(f"Domaine vérifié. Zone créée avec {result['copied']} enregistrements repris. "
+              "Vérifie-la avant délégation." + ("" if result["synced"] else PENDING), "success")
+        return redirect(url_for("domain_detail", domain_id=result["domain_id"]))
 
     @app.get("/domains/<int:domain_id>")
     @_login_required
@@ -401,7 +421,7 @@ def create_app(config_override: dict | None = None) -> Flask:
         except actions.ActionError as exc:
             _flash_error(exc)
             return redirect(url_for("dashboard"))
-        flash(f"Adresse {address['hostname']} créée.", "success")
+        flash(f"Adresse {address['hostname']} créée." + ("" if address["synced"] else PENDING), "success")
         return redirect(url_for("dashboard"))
 
     @app.route("/addresses/<int:address_id>/access", methods=["GET", "POST"])
@@ -432,6 +452,100 @@ def create_app(config_override: dict | None = None) -> Flask:
         else:
             flash("Adresse supprimée.", "success")
         return redirect(url_for("dashboard"))
+
+    @app.get("/tokens")
+    @_login_required
+    def tokens():
+        rows = get_db().execute(
+            "SELECT id,name,prefix,scopes,created_at,expires_at,last_used_at,revoked_at FROM api_tokens "
+            "WHERE user_id=? ORDER BY revoked_at IS NOT NULL, created_at DESC", (g.user["id"],),
+        ).fetchall()
+        now = int(time.time())
+        rows = [{**dict(row), "labels": [api.PERMISSIONS[item] for item in row["scopes"].split(",")
+                                         if item in api.PERMISSIONS]} for row in rows]
+        return render_template("tokens.html", tokens=rows, now=now, durations=api.TOKEN_DURATIONS,
+                               permissions=api.PERMISSIONS,
+                               api_base=f"https://{app.config['DASHBOARD_HOST']}/api/v1")
+
+    @app.post("/tokens")
+    @_login_required
+    def create_token():
+        _rate_limit("token_create", str(g.user["id"]), 10, 3600)
+        name = request.form.get("name", "").strip()
+        chosen = [item for item in request.form.getlist("permissions") if item in api.PERMISSIONS]
+        try:
+            days = int(request.form.get("days", ""))
+        except ValueError:
+            days = 0
+        db = get_db()
+        # Authentification récente exigée : le mot de passe est redemandé à chaque création.
+        row = db.execute("SELECT password_hash FROM users WHERE id=?", (g.user["id"],)).fetchone()
+        try:
+            password_ok = PASSWORDS.verify(row["password_hash"], request.form.get("password", ""))
+        except VerifyMismatchError:
+            password_ok = False
+        if not password_ok:
+            flash("Mot de passe incorrect.", "error")
+            return redirect(url_for("tokens"))
+        if not 1 <= len(name) <= 60 or any(ord(char) < 32 for char in name) or days not in api.TOKEN_DURATIONS \
+                or len(chosen) != len(request.form.getlist("permissions")):
+            flash("Nom, permissions ou durée invalides.", "error")
+            return redirect(url_for("tokens"))
+        value = api.new_token()
+        now = int(time.time())
+        with db:
+            db.execute("BEGIN IMMEDIATE")
+            active = db.execute(
+                "SELECT COUNT(*) FROM api_tokens WHERE user_id=? AND revoked_at IS NULL AND expires_at>?",
+                (g.user["id"], now),
+            ).fetchone()[0]
+            if active >= api.MAX_ACTIVE_TOKENS:
+                db.rollback()
+                flash(f"{api.MAX_ACTIVE_TOKENS} jetons actifs au plus : révoque d'abord un jeton.", "error")
+                return redirect(url_for("tokens"))
+            token_id = db.execute(
+                "INSERT INTO api_tokens(user_id,name,token_hash,prefix,scopes,created_at,expires_at) "
+                "VALUES(?,?,?,?,?,?,?)",
+                (g.user["id"], name, api.hash_token(value), value[:10], ",".join(sorted(set(chosen))), now_iso(),
+                 now + days * 86400),
+            ).lastrowid
+            db.execute("INSERT INTO api_audit(at,user_id,token_id,action,resource) VALUES(?,?,?,?,?)",
+                       (now_iso(), g.user["id"], token_id, "token.create", f"token:{token_id}"))
+        # Le jeton n'est montré qu'ici : ni flash, ni session, ni URL.
+        response = app.make_response(render_template(
+            "token_created.html", name=name, days=days, token=value,
+            granted=[api.PERMISSIONS[item] for item in sorted(set(chosen))],
+            api_base=f"https://{app.config['DASHBOARD_HOST']}/api/v1",
+        ))
+        response.headers["Cache-Control"] = "no-store"
+        return response
+
+    @app.post("/tokens/<int:token_id>/revoke")
+    @_login_required
+    def revoke_token(token_id: int):
+        with get_db() as db:
+            revoked = db.execute(
+                "UPDATE api_tokens SET revoked_at=? WHERE id=? AND user_id=? AND revoked_at IS NULL",
+                (now_iso(), token_id, g.user["id"]),
+            ).rowcount
+            if revoked:
+                db.execute("INSERT INTO api_audit(at,user_id,token_id,action,resource) VALUES(?,?,?,?,?)",
+                           (now_iso(), g.user["id"], token_id, "token.revoke", f"token:{token_id}"))
+        if not revoked:
+            abort(404)
+        flash("Jeton révoqué.", "success")
+        return redirect(url_for("tokens"))
+
+    @app.post("/tokens/revoke-all")
+    @_login_required
+    def revoke_all_tokens():
+        with get_db() as db:
+            count = db.execute("UPDATE api_tokens SET revoked_at=? WHERE user_id=? AND revoked_at IS NULL",
+                               (now_iso(), g.user["id"])).rowcount
+            db.execute("INSERT INTO api_audit(at,user_id,token_id,action,resource) VALUES(?,?,?,?,?)",
+                       (now_iso(), g.user["id"], None, "token.revoke_all", f"tokens:{count}"))
+        flash(f"{count} jeton(s) révoqué(s).", "success")
+        return redirect(url_for("tokens"))
 
     def admin_required(fn):
         @wraps(fn)

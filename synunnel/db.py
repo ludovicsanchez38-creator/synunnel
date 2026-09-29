@@ -32,6 +32,7 @@ CREATE TABLE IF NOT EXISTS domain_claims (
     token TEXT NOT NULL,
     selectors TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL,
+    domain_id INTEGER,
     UNIQUE(user_id, name)
 );
 CREATE TABLE IF NOT EXISTS records (
@@ -93,6 +94,28 @@ CREATE TABLE IF NOT EXISTS attempts (
     at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_attempts ON attempts(kind, key, at);
+CREATE TABLE IF NOT EXISTS api_tokens (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    token_hash TEXT NOT NULL UNIQUE,
+    prefix TEXT NOT NULL,
+    scopes TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    expires_at INTEGER NOT NULL,
+    last_used_at INTEGER,
+    revoked_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_api_tokens_user ON api_tokens(user_id);
+CREATE TABLE IF NOT EXISTS api_audit (
+    id INTEGER PRIMARY KEY,
+    at TEXT NOT NULL,
+    user_id INTEGER NOT NULL,
+    token_id INTEGER,
+    action TEXT NOT NULL,
+    resource TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_api_audit_at ON api_audit(at);
 CREATE TABLE IF NOT EXISTS admin_audit (
     id INTEGER PRIMARY KEY,
     at TEXT NOT NULL,
@@ -141,6 +164,8 @@ def init_db() -> None:
         # chargée dans Caddy ne peut pas être réautorisée par une adresse recréée au même nom.
         db.execute("ALTER TABLE addresses ADD COLUMN route_token TEXT")
         db.execute("UPDATE addresses SET route_token=lower(hex(randomblob(12))) WHERE route_token IS NULL")
+    if "domain_id" not in {row[1] for row in db.execute("PRAGMA table_info(domain_claims)")}:
+        db.execute("ALTER TABLE domain_claims ADD COLUMN domain_id INTEGER")
     for table in ("users", "access_codes", "host_sessions"):
         if "session_version" not in {row[1] for row in db.execute(f"PRAGMA table_info({table})")}:
             db.execute(f"ALTER TABLE {table} ADD COLUMN session_version INTEGER NOT NULL DEFAULT 0")

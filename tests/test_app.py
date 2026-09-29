@@ -341,7 +341,8 @@ def test_domain_needs_txt_proof_and_cannot_be_squatted(app):
     with app.app_context():
         db = get_db()
         assert db.execute("SELECT u.email FROM domains d JOIN users u ON u.id=d.user_id").fetchone()[0] == "owner@example.net"
-        assert db.execute("SELECT COUNT(*) FROM domain_claims").fetchone()[0] == 0
+        # La demande gagnante garde le lien vers son domaine ; celle du squatteur a disparu.
+        assert db.execute("SELECT COUNT(*) FROM domain_claims WHERE domain_id IS NULL").fetchone()[0] == 0
 
 
 def test_instance_domains_are_reserved(app):

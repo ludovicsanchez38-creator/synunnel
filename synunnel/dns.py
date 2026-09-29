@@ -156,13 +156,22 @@ def snapshot_records(domain: str, selectors: list[str]) -> list[tuple[str, str, 
     return sorted(set(result))
 
 
+def public_address(value: str) -> bool:
+    """Seules les adresses routables sur Internet sont interrogées : un domaine hostile ne peut pas
+    faire sonder le réseau interne de l'instance en annonçant des serveurs de noms privés."""
+    try:
+        return ipaddress.ip_address(value).is_global
+    except ValueError:
+        return False
+
+
 def delegation_status(domain: str, nameservers: tuple[str, str] | None = None) -> tuple[bool | None, list[str]]:
     """Interroge directement les serveurs de la zone parente."""
     parent = dns.name.from_text(domain).parent().to_text()
     try:
         parent_ns = dns.resolver.resolve(parent, "NS", lifetime=4)
         hosts = [item.target.to_text() for item in parent_ns]
-        ip = str(dns.resolver.resolve(hosts[0], "A", lifetime=4)[0])
+        ip = next(str(item) for item in dns.resolver.resolve(hosts[0], "A", lifetime=4) if public_address(str(item)))
         query = dns.message.make_query(f"{domain}.", "NS")
         query.flags &= ~dns.flags.RD
         response = dns.query.udp(query, ip, timeout=4)
@@ -172,7 +181,7 @@ def delegation_status(domain: str, nameservers: tuple[str, str] | None = None) -
             for rrset in section if rrset.rdtype == dns.rdatatype.NS
             for item in rrset
         }
-    except (dns.exception.DNSException, OSError, IndexError):
+    except (dns.exception.DNSException, OSError, IndexError, StopIteration):
         return None, []
     expected = set(nameservers or configured_nameservers())
     return expected <= seen, sorted(seen)
@@ -200,7 +209,8 @@ def ownership_proof(domain: str) -> set[str]:
     for server in servers[:4]:
         for kind in ("A", "AAAA"):
             try:
-                addresses.extend(item.to_text() for item in resolver.resolve(server, kind))
+                addresses.extend(item.to_text() for item in resolver.resolve(server, kind)
+                                 if public_address(item.to_text()))
             except dns.exception.DNSException:
                 continue
     values: set[str] = set()
@@ -241,7 +251,18 @@ class PowerDNS:
     def create_zone(self, domain: str) -> None:
         self._request("POST", "/zones", json={
             "name": f"{domain}.", "kind": "Native", "masters": [], "nameservers": list(self.nameservers),
+            "account": "synunnel",
         })
+
+    def ensure_zone(self, domain: str) -> None:
+        response = self.session.get(f"{self.base_url}/zones/{domain}.", timeout=8)
+        if response.status_code == 404:
+            self.create_zone(domain)
+        else:
+            response.raise_for_status()
+
+    def zone_names(self) -> set[str]:
+        return {item["name"].rstrip(".") for item in self._request("GET", "/zones").json()}
 
     def delete_zone(self, domain: str) -> None:
         self._request("DELETE", f"/zones/{domain}.")

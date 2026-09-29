@@ -29,7 +29,7 @@ if [[ -e /etc/synunnel/synunnel.env ]]; then
   set +a
 fi
 for setting in PUBLIC_IPV4 PUBLIC_IPV6 DASHBOARD_HOST NS1_HOST NS2_HOST ACME_EMAIL SOA_RNAME REDIRECT_HOSTS \
-  RESERVED_DOMAINS MAX_DOMAINS_PER_USER MAX_MACHINES_PER_USER; do
+  RESERVED_DOMAINS MAX_DOMAINS_PER_USER MAX_MACHINES_PER_USER MAX_ADDRESSES_PER_USER MAX_RECORDS_PER_DOMAIN; do
   if [[ "${!setting:-}" == *[$'\n\r']* ]]; then
     printf '%s ne doit pas contenir de retour à la ligne.\n' "$setting" >&2
     exit 1
@@ -49,6 +49,8 @@ REDIRECT_HOSTS="${REDIRECT_HOSTS:-}"
 RESERVED_DOMAINS="${RESERVED_DOMAINS:-}"
 MAX_DOMAINS_PER_USER="${MAX_DOMAINS_PER_USER:-20}"
 MAX_MACHINES_PER_USER="${MAX_MACHINES_PER_USER:-10}"
+MAX_ADDRESSES_PER_USER="${MAX_ADDRESSES_PER_USER:-50}"
+MAX_RECORDS_PER_DOMAIN="${MAX_RECORDS_PER_DOMAIN:-200}"
 HOSTNAME_RE='^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$'
 for list in REDIRECT_HOSTS RESERVED_DOMAINS; do
   IFS=, read -ra names <<< "${!list}"
@@ -59,7 +61,7 @@ for list in REDIRECT_HOSTS RESERVED_DOMAINS; do
     fi
   done
 done
-for quota in MAX_DOMAINS_PER_USER MAX_MACHINES_PER_USER; do
+for quota in MAX_DOMAINS_PER_USER MAX_MACHINES_PER_USER MAX_ADDRESSES_PER_USER MAX_RECORDS_PER_DOMAIN; do
   if [[ ! "${!quota}" =~ ^[1-9][0-9]{0,2}$ ]]; then
     printf '%s doit être un entier entre 1 et 999.\n' "$quota" >&2
     exit 1
@@ -150,11 +152,13 @@ ACME_EMAIL=$ACME_EMAIL
 RESERVED_DOMAINS=$RESERVED_DOMAINS
 MAX_DOMAINS_PER_USER=$MAX_DOMAINS_PER_USER
 MAX_MACHINES_PER_USER=$MAX_MACHINES_PER_USER
+MAX_ADDRESSES_PER_USER=$MAX_ADDRESSES_PER_USER
+MAX_RECORDS_PER_DOMAIN=$MAX_RECORDS_PER_DOMAIN
 SYNC_COMMAND='/usr/bin/sudo -n /usr/local/sbin/synunnel-sync'
 EOF
 fi
 for setting in DASHBOARD_HOST NS1_HOST NS2_HOST SOA_RNAME REDIRECT_HOSTS ACME_EMAIL \
-  RESERVED_DOMAINS MAX_DOMAINS_PER_USER MAX_MACHINES_PER_USER; do
+  RESERVED_DOMAINS MAX_DOMAINS_PER_USER MAX_MACHINES_PER_USER MAX_ADDRESSES_PER_USER MAX_RECORDS_PER_DOMAIN; do
   if ! grep -q "^${setting}=" /etc/synunnel/synunnel.env; then
     printf '%s=%s\n' "$setting" "${!setting}" >> /etc/synunnel/synunnel.env
   fi
@@ -234,8 +238,10 @@ if ! cmp -s "$CADDY_CANDIDATE" /etc/caddy/Caddyfile; then
   install -o root -g root -m 0644 "$CADDY_CANDIDATE" /etc/caddy/Caddyfile
 fi
 python3 -c 'import pathlib,sys; pathlib.Path(sys.argv[1]).unlink()' "$CADDY_CANDIDATE"
-sed "s#@REPO_DIR@#$REPO_DIR#g" "$REPO_DIR/config/synunnel.service" > /etc/systemd/system/synunnel.service
-chmod 0644 /etc/systemd/system/synunnel.service
+for unit in synunnel.service synunnel-reconcile.service synunnel-reconcile.timer; do
+  sed "s#@REPO_DIR@#$REPO_DIR#g" "$REPO_DIR/config/$unit" > "/etc/systemd/system/$unit"
+  chmod 0644 "/etc/systemd/system/$unit"
+done
 install -o root -g root -m 0644 "$REPO_DIR/config/wg0-firewall.nft" /etc/synunnel/wg0-firewall.nft
 
 systemctl daemon-reload
@@ -244,6 +250,7 @@ systemctl restart pdns
 "$REPO_DIR/.venv/bin/python" "$REPO_DIR/scripts/migrate-authority.py"
 "$REPO_DIR/.venv/bin/python" "$REPO_DIR/scripts/check-overlaps.py"
 systemctl enable --now synunnel
+systemctl enable --now synunnel-reconcile.timer
 systemctl restart synunnel
 for attempt in 1 2 3 4 5; do
   if curl --silent --fail http://127.0.0.1:8000/login >/dev/null; then break; fi

@@ -1,0 +1,8 @@
+{% extends "base.html" %}
+{% block title %}Jeton créé{% endblock %}
+{% block content %}
+<section class="page-head"><span class="eyebrow">Affichage unique</span><h1>Jeton « {{ name }} » créé</h1><p>Copie-le maintenant dans le coffre de ton agent. Il ne sera plus jamais affiché et Synunnel n'en garde qu'une empreinte. Il peut tout lire{% if granted %} et modifier : {{ granted | join(', ') | lower }}{% else %}, sans rien modifier{% endif %}. Valable {{ days }} jours.</p></section>
+<section class="card secret-card"><h2>Jeton</h2><textarea readonly rows="2">{{ token }}</textarea>
+  <p class="small">À envoyer uniquement dans l'en-tête « Authorization: Bearer … » vers {{ api_base }}.</p>
+  <a class="button" href="{{ url_for('tokens') }}">J'ai copié le jeton</a></section>
+{% endblock %}

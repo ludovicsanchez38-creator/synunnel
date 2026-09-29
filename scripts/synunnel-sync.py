@@ -72,7 +72,8 @@ def caddy_routes(db: sqlite3.Connection) -> str:
     rows = db.execute(
         "SELECT a.hostname,a.port,m.ip,a.route_token FROM addresses a "
         "JOIN domains d ON d.id=a.domain_id JOIN users u ON u.id=d.user_id "
-        "JOIN machines m ON m.id=a.machine_id WHERE u.status='approved' ORDER BY a.hostname"
+        "JOIN machines m ON m.id=a.machine_id AND m.user_id=d.user_id "
+        "WHERE u.status='approved' ORDER BY a.hostname"
     )
     for n, row in enumerate(rows, 1):
         host, port, ip, token = row
@@ -87,6 +88,12 @@ def caddy_routes(db: sqlite3.Connection) -> str:
             f"    @synunnel_callback_{n} path /__synunnel/auth/callback",
             f"    handle @synunnel_callback_{n} {{",
             "        reverse_proxy 127.0.0.1:8000",
+            "    }",
+            # Un jeton d'API Synunnel envoyé par erreur à cette adresse ne doit jamais
+            # atteindre le service qui s'y trouve.
+            f"    @synunnel_token_{n} header_regexp Authorization ^[Bb]earer[[:space:]]+syn_",
+            f"    handle @synunnel_token_{n} {{",
+            '        respond "Jeton Synunnel refusé sur cette adresse" 421',
             "    }",
             f"    @synunnel_internal_{n} path /internal/*",
             f"    handle @synunnel_internal_{n} {{",

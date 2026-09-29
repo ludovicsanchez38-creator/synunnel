@@ -1,0 +1,19 @@
+[Unit]
+Description=Synunnel, rapprochement de PowerDNS, WireGuard et Caddy avec la base
+After=network-online.target pdns.service synunnel.service
+
+[Service]
+Type=oneshot
+User=synunnel
+Group=synunnel
+WorkingDirectory=@REPO_DIR@
+EnvironmentFile=/etc/synunnel/synunnel.env
+ExecStart=@REPO_DIR@/.venv/bin/python @REPO_DIR@/scripts/reconcile.py
+UMask=0027
+PrivateTmp=true
+ProtectHome=read-only
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+TimeoutStartSec=300
