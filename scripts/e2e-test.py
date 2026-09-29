@@ -7,6 +7,8 @@ Pendant l'essai, le Caddyfile, la base, PowerDNS et WireGuard réels sont modifi
 ne jamais le lancer sur une instance qui sert de vrais utilisateurs.
 """
 
+import hashlib
+import json
 import os
 import secrets
 import sqlite3
@@ -117,6 +119,13 @@ def main() -> None:
                 "VALUES(?,?,?,?,1,?,?)",
                 (domain_id, machine_id, PROTECTED, 18080, "2026-09-27T00:00:00Z", secrets.token_hex(12)),
             )
+            api_token = "syn_" + secrets.token_urlsafe(32)
+            db.execute(
+                "INSERT INTO api_tokens(user_id,name,token_hash,prefix,scopes,created_at,expires_at) "
+                "VALUES(?,?,?,?,?,?,?)",
+                (user_id, "e2e", hashlib.sha256(api_token.encode()).hexdigest(), api_token[:10],
+                 "addresses,domains,machines,sharing", "2026-09-27T00:00:00Z", int(time.time()) + 3600),
+            )
             pdns.sync_zone(db, domain_id, DOMAIN, values["PUBLIC_IPV4"], values["PUBLIC_IPV6"])
         run("/usr/local/sbin/synunnel-sync")
 
@@ -223,6 +232,19 @@ def main() -> None:
         if rejected.returncode == 0:
             raise AssertionError("Le nom d'hôte non déclaré a été accepté.")
         print("Nom d'hôte non déclaré refusé au TLS : OK")
+
+        base = ["curl", "--noproxy", "*", "--silent", "--show-error", "--insecure", "--max-time", "8"]
+        me = run(*base, "--resolve", f"{dashboard_host}:443:{values['PUBLIC_IPV4']}",
+                 "--header", f"Authorization: Bearer {api_token}", f"https://{dashboard_host}/api/v1/me").stdout
+        if json.loads(me).get("email") != EMAIL:
+            raise AssertionError(f"L'API ne répond pas au jeton de l'essai : {me[:200]!r}")
+        print("API pour agents par HTTPS sur le tableau de bord : OK")
+        leak = run(*base, "--resolve", f"{HOST}:443:{values['PUBLIC_IPV4']}", "--output", "/dev/null",
+                   "--write-out", "%{http_code}", "--header", f"Authorization: Bearer {api_token}",
+                   f"https://{HOST}/", check=False).stdout.strip()
+        if leak != "421":
+            raise AssertionError(f"Une adresse publiée a accepté un jeton Synunnel (statut {leak}).")
+        print("Jeton Synunnel refusé par une adresse publiée, jamais transmis au service : OK")
         completed = True
     finally:
         errors: list[str] = []
