@@ -8,11 +8,11 @@ import shlex
 import subprocess
 from collections.abc import Callable
 
-import requests
 from flask import Flask
 
 from .db import allocate_id, get_db, now_iso
-from .dns import PowerDNS, fqdn, normalize_domain, relative_name, snapshot_records
+from .dns import canonical_content, fqdn, normalize_domain, relative_name, snapshot_records
+from .keys import generate_keypair
 
 
 def _refuse_nested(db, domain_name: str) -> None:
@@ -21,14 +21,6 @@ def _refuse_nested(db, domain_name: str) -> None:
         "OR substr(name, -length(?) - 1)='.' || ?", (domain_name, domain_name, domain_name),
     ).fetchone():
         raise ValueError("Ce domaine recouvre une zone déjà gérée par l'instance.")
-
-
-def generate_keypair() -> tuple[str, str]:
-    """Paire WireGuard (privée, publique) générée par l'outil officiel."""
-    private = subprocess.run(["wg", "genkey"], check=True, capture_output=True, text=True).stdout.strip()
-    public = subprocess.run(["wg", "pubkey"], input=private + "\n", check=True,
-                            capture_output=True, text=True).stdout.strip()
-    return private, public
 
 
 def provision_site(
@@ -64,6 +56,9 @@ def provision_site(
     if existing_domain is None:
         _refuse_nested(db, domain_name)
     copied = snapshot(domain_name, []) if existing_domain is None else []
+    # Mêmes contrôles de contenu qu'une saisie ; l'administrateur n'est pas tenu par le quota.
+    copied = [(rel if rel == "@" else relative_name(rel), kind, canonical_content(kind, content), ttl)
+              for rel, kind, content, ttl in copied]
     if existing_domain is None and not copied:
         raise ValueError("Copie DNS vide : zone non créée.")
 
@@ -82,6 +77,7 @@ def provision_site(
             for record in copied:
                 db.execute("INSERT INTO records(id,domain_id,name,type,content,ttl) VALUES(?,?,?,?,?,?)",
                            (allocate_id(db, "records"), domain_id, *record))
+            db.execute("DELETE FROM zone_removals WHERE name=?", (domain_name,))
         else:
             domain_id = existing_domain["id"]
         machine = db.execute("SELECT * FROM machines WHERE user_id=? AND name=?",
@@ -121,15 +117,9 @@ def provision_site(
             elif (address["domain_id"] != domain_id or address["machine_id"] != machine_id
                   or address["port"] != port or not address["protected"] or not address["shared"]):
                 raise ValueError(f"Adresse existante avec une configuration différente : {hostname}.")
-    if app.config["PDNS_ENABLED"]:
-        pdns = PowerDNS(app.config["PDNS_API_URL"], app.config["PDNS_API_KEY"], (
-            f"{app.config['NS1_HOST']}.", f"{app.config['NS2_HOST']}.",
-        ))
-        try:
-            pdns.ensure_zone(domain_name)
-            pdns.sync_zone(db, domain_id, domain_name, app.config["PUBLIC_IPV4"], app.config["PUBLIC_IPV6"])
-        except requests.RequestException as exc:
-            print(f"PowerDNS pas encore à jour ({exc}) : le rapprochement automatique terminera.")
+    from . import actions  # import tardif : actions dépend de ce module pour les clés
+    if not actions.project_zone(app, {"id": domain_id, "name": domain_name}):
+        print("PowerDNS pas encore à jour : le rapprochement automatique terminera.")
     if app.config.get("SYNC_COMMAND"):
         try:
             subprocess.run(shlex.split(app.config["SYNC_COMMAND"]), check=True, capture_output=True, timeout=20)

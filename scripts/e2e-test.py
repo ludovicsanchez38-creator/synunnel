@@ -249,6 +249,14 @@ def main() -> None:
                       f"https://{HOST}/", check=False).stdout.strip()
         if shouted != "421":
             raise AssertionError(f"Le filtre des jetons dépend de la casse (statut {shouted}).")
+        # Un espace insécable (octet 0xA0) entre le schéma et le jeton ne doit pas faire passer le jeton.
+        spaced = subprocess.run(
+            [*base, "--resolve", f"{HOST}:443:{values['PUBLIC_IPV4']}", "--output", "/dev/null",
+             "--write-out", "%{http_code}", "--header", b"Authorization: Bearer \xa0" + api_token.encode(),
+             f"https://{HOST}/"], capture_output=True, timeout=15, check=False,
+        ).stdout.decode().strip()
+        if spaced != "421":
+            raise AssertionError(f"Le filtre des jetons laisse passer un espace insécable (statut {spaced}).")
         print("Jeton Synunnel refusé par une adresse publiée, jamais transmis au service : OK")
         completed = True
     finally:

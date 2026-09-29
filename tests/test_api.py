@@ -255,7 +255,7 @@ def test_published_addresses_refuse_synunnel_tokens():
         f"INSERT INTO addresses VALUES('nas.exemple.fr',80,1,1,'{'a' * 24}'),('vol.exemple.fr',80,1,2,'{'b' * 24}');"
     )
     rendered = routes(db)
-    assert "header_regexp Authorization (?i)^bearer[[:space:]]+syn_" in rendered
+    assert "header_regexp Authorization syn_[A-Za-z0-9_-]+" in rendered
     # Une adresse dont la machine appartient à un autre compte n'est jamais routée.
     assert "nas.exemple.fr" in rendered and "vol.exemple.fr" not in rendered
 

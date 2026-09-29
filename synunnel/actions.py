@@ -38,7 +38,7 @@ from .dns import (
     relative_name,
     snapshot_records,
 )
-from .provision import generate_keypair
+from .keys import generate_keypair
 
 EMAIL_RE = re.compile(r"^[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+$")
 MACHINE_NAME_MAX = 80
@@ -148,9 +148,16 @@ def project_zone(app: Flask, domain) -> bool:
         return True
     lock = zone_lock(app, domain["name"])
     try:
+        # Sous le verrou de zone, on relit l'incarnation courante : un domaine supprimé entre-temps
+        # n'est jamais recréé dans PowerDNS par une projection engagée avant sa suppression.
+        current = get_db().execute("SELECT id FROM domains WHERE id=? AND name=?",
+                                   (domain["id"], domain["name"])).fetchone()
+        if current is None:
+            return True
         pdns = _pdns(app)
         pdns.ensure_zone(domain["name"])
-        pdns.sync_zone(get_db(), domain["id"], domain["name"], app.config["PUBLIC_IPV4"], app.config["PUBLIC_IPV6"])
+        pdns.sync_zone(get_db(), domain["id"], domain["name"], app.config["PUBLIC_IPV4"], app.config["PUBLIC_IPV6"],
+                       deadline=time.monotonic() + 60)
     except requests.RequestException:
         return False
     finally:
@@ -402,6 +409,7 @@ def verify_claim(app: Flask, user_id: int, claim_id: int, guard: Guard = None, a
             for record in snapshot:
                 db.execute("INSERT INTO records(id,domain_id,name,type,content,ttl) VALUES(?,?,?,?,?,?)",
                            (allocate_id(db, "records"), domain_id, *record))
+            db.execute("DELETE FROM zone_removals WHERE name=?", (domain,))
             # La preuve est faite : les demandes concurrentes sur ce nom tombent, celle-ci garde
             # le lien vers le domaine pour qu'une vérification rejouée retrouve son résultat.
             db.execute("DELETE FROM domain_claims WHERE name=? AND id<>?", (domain, claim_id))
@@ -491,16 +499,23 @@ def delete_record(app: Flask, user_id: int, domain_id: int, record_id: int, guar
 
 def remove_zone(app: Flask, name: str) -> bool:
     """Retire une zone de PowerDNS ; en cas d'échec, la pierre tombale reste et le rapprochement réessaie."""
-    if app.config["PDNS_ENABLED"]:
-        lock = zone_lock(app, name)
-        try:
+    lock = zone_lock(app, name) if app.config["PDNS_ENABLED"] else None
+    try:
+        db = get_db()
+        if db.execute("SELECT 1 FROM domains WHERE name=?", (name,)).fetchone():
+            # Le nom a une nouvelle incarnation : l'ancienne suppression ne la vise pas.
+            with db:
+                db.execute("DELETE FROM zone_removals WHERE name=?", (name,))
+            return True
+        if lock is not None:
             _pdns(app).delete_zone(name)
-        except requests.RequestException:
-            return False
-        finally:
+        with db:
+            db.execute("DELETE FROM zone_removals WHERE name=?", (name,))
+    except requests.RequestException:
+        return False
+    finally:
+        if lock is not None:
             lock.close()
-    with get_db() as db:
-        db.execute("DELETE FROM zone_removals WHERE name=? AND name NOT IN (SELECT name FROM domains)", (name,))
     return True
 
 

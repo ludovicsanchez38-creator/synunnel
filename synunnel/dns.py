@@ -224,8 +224,12 @@ def ownership_proof(domain: str) -> set[str]:
         servers = [item.target.to_text() for item in resolver.resolve(zone, "NS")]
     except dns.exception.DNSException as exc:
         raise ValueError("Impossible de trouver les serveurs DNS actuels du domaine.") from exc
-    addresses: list[str] = []
-    for server in servers[:4]:
+    counts: Counter = Counter()
+    answered = 0
+    # Une voix par serveur de noms (et non par adresse) : un serveur joignable en IPv4 et en IPv6
+    # ne compte pas double.
+    for server in sorted(set(servers))[:4]:
+        addresses: list[str] = []
         for kind in ("A", "AAAA"):
             if time.monotonic() > deadline:
                 break
@@ -234,31 +238,34 @@ def ownership_proof(domain: str) -> set[str]:
                                  if public_address(item.to_text()))
             except dns.exception.DNSException:
                 continue
-    counts: Counter = Counter()
-    answered = 0
-    for address in addresses[:8]:
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
+        values: set[str] | None = None
+        for address in sorted(set(addresses))[:2]:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            try:
+                response, _tcp = dns.query.udp_with_fallback(dns.message.make_query(target, "TXT"), address,
+                                                             timeout=min(3, remaining))
+            except (dns.exception.DNSException, OSError):
+                continue
+            # Seule une réponse faisant autorité compte.
+            if not response.flags & dns.flags.AA or response.rcode() not in (dns.rcode.NOERROR,
+                                                                              dns.rcode.NXDOMAIN):
+                continue
+            values = {
+                b"".join(item.strings).decode("utf-8", "replace")
+                for rrset in response.answer
+                if rrset.rdtype == dns.rdatatype.TXT and rrset.name == target
+                for item in rrset
+            }
             break
-        try:
-            response, _tcp = dns.query.udp_with_fallback(dns.message.make_query(target, "TXT"), address,
-                                                         timeout=min(3, remaining))
-        except (dns.exception.DNSException, OSError):
-            continue
-        # Seule une réponse faisant autorité compte.
-        if not response.flags & dns.flags.AA or response.rcode() not in (dns.rcode.NOERROR, dns.rcode.NXDOMAIN):
-            continue
-        answered += 1
-        counts.update({
-            b"".join(item.strings).decode("utf-8", "replace")
-            for rrset in response.answer
-            if rrset.rdtype == dns.rdatatype.TXT and rrset.name == target
-            for item in rrset
-        })
+        if values is not None:
+            answered += 1
+            counts.update(values)
     if not answered:
         raise ValueError("Aucun serveur DNS du domaine n'a répondu ; réessaie dans quelques minutes.")
-    # La preuve doit être servie par la majorité des serveurs qui ont répondu : un serveur isolé,
-    # repris le temps d'une minute, ne suffit pas.
+    # La preuve doit être servie par la majorité des serveurs de noms qui ont répondu : un serveur
+    # isolé, repris le temps d'une minute, ne suffit pas.
     return {value for value, seen in counts.items() if seen * 2 > answered}
 
 
@@ -320,7 +327,8 @@ class PowerDNS:
         ]})
         return True
 
-    def sync_zone(self, db, domain_id: int, domain: str, public_ipv4: str, public_ipv6: str) -> None:
+    def sync_zone(self, db, domain_id: int, domain: str, public_ipv4: str, public_ipv6: str,
+                  deadline: float | None = None) -> None:
         current = self._request("GET", f"/zones/{domain}.").json()["rrsets"]
         wanted: dict[tuple[str, str], list[str]] = defaultdict(list)
         # Enregistrements et adresses lus dans un même instantané de la base.
@@ -363,6 +371,9 @@ class PowerDNS:
         # Suppressions d'abord, puis chaque RRset seul : un enregistrement refusé par PowerDNS
         # n'empêche plus les autres d'être appliqués.
         for change in sorted(changes, key=lambda item: item["changetype"] != "DELETE"):
+            if deadline is not None and time.monotonic() > deadline:
+                failed.append("budget de temps atteint")
+                break
             try:
                 self._request("PATCH", f"/zones/{domain}.", json={"rrsets": [change]})
             except requests.HTTPError:

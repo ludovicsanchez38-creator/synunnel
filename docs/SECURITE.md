@@ -36,7 +36,7 @@
 - Authentification Bearer exclusive : aucune session n'est ouverte ni renouvelée sur `/api/`, aucun cookie n'y est lu, aucune exemption CSRF ne dépend de la présence d'un en-tête. Un jeton n'ouvre ni le tableau de bord ni l'API d'administration.
 - Corps JSON strict (champs connus, types exacts, tailles bornées), réponses construites par liste blanche (aucun jeton de route ni secret), `Cache-Control: no-store` sur toutes les réponses de l'API, erreurs JSON sans détail technique.
 - La clé privée WireGuard d'une machine déclarée par l'API ne transite jamais : l'agent la génère sur la machine et n'envoie que la clé publique.
-- Les adresses publiées refusent toute requête portant un jeton Synunnel (421) : un agent qui se tromperait d'adresse ne le livre jamais au service hébergé.
+- L'API n'accepte le jeton que sous la forme stricte `Bearer syn_...` en ASCII, et les adresses publiées refusent toute requête dont l'en-tête Authorization contient un jeton Synunnel, quelle que soit sa forme (421) : un agent qui se tromperait d'adresse ne le livre jamais au service hébergé.
 - Chaque écriture de l'API est journalisée (`api_audit` : compte, jeton, action, ressource) dans la même transaction que la modification ; création et révocation des jetons aussi.
 
 **Système**
@@ -57,7 +57,8 @@
 - **Copie DNS incomplète par nature.** Le DNS public ne liste ni tous les sous-domaines ni tous les sélecteurs DKIM. Le joker vers le VPS peut capter un nom oublié, par exemple l'hôte d'un MX. Comparer la zone à l'export du fournisseur actuel avant de déléguer.
 - **Cookie d'accès transmis au service.** Pour une adresse protégée, le cookie Synunnel de cet hôte accompagne les requêtes jusqu'au service de la machine. Un service qui journalise ou renvoie les cookies l'exposerait jusqu'à son expiration.
 - **WebSocket.** Une connexion WebSocket déjà ouverte n'est pas recontrôlée à chaque message : retirer un invité ne la coupe pas.
-- **Ressources.** Une requête anonyme sur l'API d'administration produit une écriture en base (journal purgé après 90 jours par le rapprochement). Les limites de débit sont par compte, pas globales : une instance ouverte à beaucoup de comptes demanderait une limite globale en amont.
+- **Ressources.** Les limites de débit sont par compte et par adresse, pas globales, et une rafale simultanée peut les dépasser de quelques requêtes ; une instance ouverte à beaucoup de comptes demanderait une limite globale en amont. Les refus anonymes de l'API d'administration sont comptés sans être journalisés en base.
+- **Identifiants antérieurs à la mise à niveau.** Les compteurs d'identifiants sont amorcés avec une marge de 1 000 au-dessus du plus grand identifiant présent ; un identifiant supprimé avant la mise à niveau et situé au-delà de cette marge pourrait théoriquement revenir.
 - **Domaines déjà délégués.** Un domaine dont les serveurs de noms désignent déjà l'instance, sans zone chez elle, ne peut plus prouver sa propriété : repasser temporairement par un autre hébergeur DNS, ou demander à l'administrateur (`scripts/provision-site.py`).
 - **Proxy dans un conteneur.** Le pare-feu du tunnel bloque aussi le trafic transféré depuis `wg0` : un reverse proxy qui tournerait dans un bridge Docker au lieu de Caddy sur l'hôte demanderait une règle adaptée.
 - **Réutilisation des IP du tunnel.** L'IP d'une machine supprimée est réattribuable immédiatement, sans période de quarantaine.

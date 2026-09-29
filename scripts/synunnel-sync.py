@@ -116,7 +116,8 @@ def caddy_routes(db: sqlite3.Connection) -> str:
             "    }",
             # Un jeton d'API Synunnel envoyé par erreur à cette adresse ne doit jamais
             # atteindre le service qui s'y trouve.
-            f"    @synunnel_token_{n} header_regexp Authorization (?i)^bearer[[:space:]]+syn_",
+            # Sans accolades (Caddy les lirait comme un paramètre) : tout « syn_ » suivi d'un caractère de jeton.
+            f"    @synunnel_token_{n} header_regexp Authorization syn_[A-Za-z0-9_-]+",
             f"    handle @synunnel_token_{n} {{",
             '        respond "Jeton Synunnel refusé sur cette adresse" 421',
             "    }",
@@ -179,6 +180,9 @@ def apply_wireguard(new_wg: str, _routes: str) -> None:
     if new_wg == old_wg and applied(APPLIED_WG, new_wg) and wireguard_active():
         return
     # Écrit mais jamais appliqué (interruption, redémarrage) : on réapplique, c'est idempotent.
+    # L'empreinte tombe AVANT toute écriture : une interruption ne peut jamais laisser croire
+    # qu'une configuration écrite est appliquée.
+    APPLIED_WG.unlink(missing_ok=True)
     atomic_write(WG_CONFIG_PATH, new_wg, 0o600)
     try:
         if wireguard_active():
@@ -204,6 +208,7 @@ def apply_caddy(_wg: str, new_routes: str) -> None:
     old_routes = CADDY_ROUTES_PATH.read_text() if CADDY_ROUTES_PATH.exists() else ""
     if new_routes == old_routes and applied(APPLIED_CADDY, new_routes):
         return
+    APPLIED_CADDY.unlink(missing_ok=True)
     atomic_write(CADDY_ROUTES_PATH, new_routes, 0o644)
     try:
         run("/usr/bin/caddy", "validate", "--config", str(CADDYFILE_PATH), "--adapter", "caddyfile")

@@ -37,15 +37,17 @@ def main() -> int:
             db.execute("DELETE FROM domain_claims WHERE created_at < strftime('%Y-%m-%dT%H:%M:%S', 'now', '-30 days')")
             db.execute("DELETE FROM admin_audit WHERE at < strftime('%Y-%m-%dT%H:%M:%S', 'now', ?)", (cutoff,))
             db.execute("DELETE FROM api_audit WHERE at < strftime('%Y-%m-%dT%H:%M:%S', 'now', ?)", (cutoff,))
-        # 2. Zones de domaines supprimés, pas encore retirées de PowerDNS.
-        for row in db.execute("SELECT name FROM zone_removals").fetchall():
-            if not remove_zone(app, row["name"]):
-                failures += 1
-                print(f"Zone {row['name']} supprimée en base, pas encore dans PowerDNS.", file=sys.stderr)
-        # 3. Tunnel et routes : rapides, et indépendants de PowerDNS.
+        # 2. Tunnel et routes : rapides, et indépendants de PowerDNS.
         if not project_runtime(app):
             failures += 1
             print("Synchronisation WireGuard et Caddy en échec.", file=sys.stderr)
+        # 3. Zones de domaines supprimés, pas encore retirées de PowerDNS, dans le budget.
+        for row in db.execute("SELECT name FROM zone_removals ORDER BY at").fetchall():
+            if time.monotonic() - started > BUDGET_SECONDS:
+                break
+            if not remove_zone(app, row["name"]):
+                failures += 1
+                print(f"Zone {row['name']} supprimée en base, pas encore dans PowerDNS.", file=sys.stderr)
         # 4. Zones DNS dans un budget de temps, en commençant chaque fois ailleurs : une zone lente ou un
         #    PowerDNS figé n'empêche plus les autres d'avancer d'une exécution à l'autre.
         domains = db.execute("SELECT id, name FROM domains ORDER BY id").fetchall()

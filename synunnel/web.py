@@ -658,6 +658,12 @@ def create_app(config_override: dict | None = None) -> Flask:
         db = get_db()
         with db:
             db.execute("BEGIN IMMEDIATE")
+            if db.execute("SELECT 1 FROM domains WHERE user_id=? UNION SELECT 1 FROM machines WHERE user_id=?",
+                          (user_id, user_id)).fetchone():
+                # Compte suspendu qui a encore des domaines ou des machines : les retirer d'abord,
+                # pour que leurs zones et pairs soient nettoyés proprement.
+                db.rollback()
+                return jsonify({"error": "compte avec domaines ou machines : retire-les d'abord"}), 409
             deleted = db.execute("DELETE FROM users WHERE id=? AND email=? AND status='pending'",
                                  (user_id, email)).rowcount
             if deleted != 1:

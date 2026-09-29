@@ -8,6 +8,7 @@ uniquement depuis le tableau de bord. Le cookie de session n'est jamais lu ici.
 """
 
 import hashlib
+import re
 import secrets
 import threading
 import time
@@ -78,7 +79,7 @@ _READS: dict[int, deque] = {}
 _READS_LOCK = threading.Lock()
 
 
-def _limit_reads(user_id: int, limit: int = 600, window: int = 60) -> None:
+def _limit_reads(user_id: int, limit: int = 300, window: int = 60) -> None:
     """Lectures limitées en mémoire, par processus : aucune écriture en base pour une simple lecture."""
     now = time.monotonic()
     with _READS_LOCK:
@@ -107,11 +108,15 @@ def _token_row(db, token_id: int):
     ).fetchone()
 
 
+TOKEN_HEADER_RE = re.compile(r"^[Bb][Ee][Aa][Rr][Ee][Rr] (syn_[A-Za-z0-9_-]{40,80})$")
+
+
 def _authenticate():
-    header = request.headers.get("Authorization", "")
-    scheme, _, value = header.partition(" ")
-    value = value.strip()
-    if scheme.lower() != "bearer" or not value.startswith(TOKEN_PREFIX) or len(value) > 128 or not value.isascii():
+    # Forme stricte, en ASCII, sans aucune normalisation : ce que l'API accepte, le filtre des
+    # adresses publiées le reconnaît forcément.
+    match = TOKEN_HEADER_RE.fullmatch(request.headers.get("Authorization", ""))
+    value = match.group(1) if match else ""
+    if not match:
         _refuse_anonymous()
         raise _unauthorized("Jeton d'API manquant ou mal formé.")
     db = get_db()

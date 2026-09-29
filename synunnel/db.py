@@ -200,6 +200,11 @@ def init_db() -> None:
         # chargée dans Caddy ne peut pas être réautorisée par une adresse recréée au même nom.
         db.execute("ALTER TABLE addresses ADD COLUMN route_token TEXT")
         db.execute("UPDATE addresses SET route_token=lower(hex(randomblob(12))) WHERE route_token IS NULL")
+    for table in sorted(ID_TABLES):
+        # Amorçage à la mise à niveau : la marge couvre les identifiants supprimés avant l'existence
+        # des compteurs, que MAX(id) ne voit plus.
+        db.execute(f"INSERT OR IGNORE INTO id_counters(name,last) SELECT ?, COALESCE(MAX(id), 0) + "
+                   f"CASE WHEN COUNT(*) > 0 THEN 1000 ELSE 0 END FROM {table}", (table,))
     domain_columns = {row[1] for row in db.execute("PRAGMA table_info(domains)")}
     for column in ("delegation_active INTEGER", "delegation_ns TEXT", "delegation_checked_at INTEGER"):
         if column.split()[0] not in domain_columns:

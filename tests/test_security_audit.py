@@ -101,6 +101,15 @@ def test_token_filter_covers_every_case_the_api_accepts(app):
         assert pattern.search(header), scheme
 
 
+def test_unicode_spaces_are_refused_by_api_and_caught_by_filter(app):
+    owner = account(app, "nbsp@example.net")
+    token = create_token(owner, "read")
+    pattern = token_filter()
+    for header in (f"Bearer \u00a0{token}", f"Bearer  {token}", f"Bearer\t{token}"):
+        assert app.test_client().get("/api/v1/me", headers={"Authorization": header}).status_code == 401
+        assert pattern.search(header)
+
+
 def test_public_address_requires_sharing_permission(app):
     owner = account(app, "proteg@example.net")
     domain_id = add_domain(owner, "proteg.example.net")

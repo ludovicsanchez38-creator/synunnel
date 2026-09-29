@@ -46,7 +46,7 @@ def document(app: Flask) -> dict:
                 "Un jeton se crée et se révoque depuis le tableau de bord (page Jetons d'API), jamais par l'API. "
                 "Tout jeton peut lire ; chaque écriture exige la permission indiquée en x-permission "
                 "(domains, machines, addresses, sharing). Une machine se déclare avec sa clé publique : générez "
-                "la paire sur la machine (umask 077 ; wg genkey | tee cle.privee | wg pubkey). Ajout d'un domaine : POST "
+                "la paire sur la machine (umask 077 ; wg genkey > cle.privee ; chmod 600 cle.privee ; wg pubkey < cle.privee). Ajout d'un domaine : POST "
                 "/domains renvoie l'enregistrement TXT à poser chez l'hébergeur DNS actuel, puis POST "
                 "/claims/{id}/verify crée la zone et recopie les enregistrements publics ; vérifiez-la avant de "
                 "déléguer le domaine aux serveurs de noms indiqués par GET /me. N'envoyez le jeton qu'à "
