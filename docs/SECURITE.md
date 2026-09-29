@@ -11,6 +11,7 @@
 
 **Domaines**
 - Un domaine n'est créé qu'après une **preuve de propriété** : un TXT `_synunnel.<domaine>` propre à la demande, lu directement chez les serveurs qui font autorité pour la zone (réponse `AA` exigée, repli TCP). Tant que la preuve manque, aucune zone n'existe et le nom reste ouvert à son véritable propriétaire ; la première preuve valide l'emporte et annule les demandes concurrentes.
+- Un refus pour cause de zone existante ne révèle jamais le nom d'une zone d'un autre compte.
 - Deux zones ne se recouvrent jamais : un domaine qui contient une zone existante, ou qui est contenu dans l'une d'elles, est refusé, quel que soit le compte, depuis le tableau de bord comme depuis l'outil d'administration (contrôle refait sous verrou d'écriture). À la mise à niveau, l'installateur s'arrête si une ancienne base contient des zones imbriquées et les nomme ; il ne supprime rien lui-même.
 - Les noms de l'instance (tableau de bord, serveurs de noms, redirections) et ceux de `RESERVED_DOMAINS` ne peuvent pas être revendiqués, ni rien de ce qu'ils contiennent ; leurs domaines parents sont réservés au nom exact. Une réservation ajoutée après coup s'applique aussi aux demandes en cours.
 - Un CNAME ne partage jamais son nom ; une adresse ne peut écraser un A, AAAA ou CNAME existant ; la longueur des noms complets est contrôlée.
@@ -25,8 +26,20 @@
 - `forward_auth` contrôle toutes les routes, publiques comprises. Chaque route porte le jeton de son incarnation : une route supprimée mais encore chargée dans Caddy reste refusée, même si l'adresse est recréée au même nom vers une autre machine.
 - Caddy n'émet un certificat que pour un nom autorisé par l'application (`on_demand_tls` avec `ask`).
 
+**API pour agents**
+- Jetons créés et révoqués uniquement depuis le tableau de bord, avec mot de passe redemandé ; 256 bits d'aléa, seule leur empreinte SHA-256 est gardée ; 7 ou 30 jours ; cinq actifs au plus.
+- Permissions explicites par jeton (`domains`, `machines`, `addresses`, `sharing`), la lecture étant toujours permise. Jeton, compte et expiration sont recontrôlés sous le verrou d'écriture qui accepte chaque modification : une révocation pendant une opération longue l'arrête.
+- Authentification Bearer exclusive : aucune session n'est ouverte ni renouvelée sur `/api/`, aucun cookie n'y est lu, aucune exemption CSRF ne dépend de la présence d'un en-tête. Un jeton n'ouvre ni le tableau de bord ni l'API d'administration.
+- Corps JSON strict (champs connus, types exacts, tailles bornées), réponses construites par liste blanche (aucun jeton de route ni secret), `Cache-Control: no-store` sur toutes les réponses de l'API, erreurs JSON sans détail technique.
+- La clé privée WireGuard d'une machine déclarée par l'API ne transite jamais : l'agent la génère sur la machine et n'envoie que la clé publique.
+- Les adresses publiées refusent toute requête portant un jeton Synunnel (421) : un agent qui se tromperait d'adresse ne le livre jamais au service hébergé.
+- Chaque écriture de l'API est journalisée (`api_audit` : compte, jeton, action, ressource) dans la même transaction que la modification ; création et révocation des jetons aussi.
+
 **Système**
 - L'application tourne sous l'utilisateur `synunnel`, liée à `127.0.0.1:8000` ; l'API PowerDNS est liée à `127.0.0.1:8081`. PowerDNS n'est pas récursif et refuse AXFR.
+- La base fait foi : chaque modification vérifie ses conditions (propriété, recouvrement, quotas, conflits DNS) et écrit sous un même verrou d'écriture, sans appel réseau pendant ce verrou. PowerDNS, WireGuard et Caddy sont mis à jour ensuite ; un échec est terminé par le rapprochement automatique (`synunnel-reconcile.timer`, toutes les cinq minutes), qui signale aussi les zones présentes dans PowerDNS sans domaine en base, sans jamais les supprimer.
+- Une route Caddy n'est générée que si la machine appartient au même compte que le domaine.
+- Les vérifications DNS (preuve TXT, délégation) n'interrogent que des adresses publiques : un domaine hostile ne peut pas faire sonder le réseau interne de l'instance.
 - Seul l'assistant `/usr/local/sbin/synunnel-sync` (root, appelé par une entrée sudoers limitée) écrit les configurations WireGuard et Caddy. Il revalide noms, IP, ports et clés, lit pairs et routes dans une seule transaction et sérialise ses exécutions par un verrou.
 - **Pare-feu du tunnel** : la table nftables `synunnel_wg`, chargée avant chaque démarrage de `wg0`, ne laisse entrer par le tunnel que les réponses aux connexions ouvertes par le VPS (sens `reply` du suivi de connexion) et bloque tout transit d'une machine à l'autre. Une machine ne peut joindre aucun service du VPS, SSH compris, pas même par une connexion antérieure au chargement de la table. Cette table s'applique même si UFW est inactif ; si elle ne peut pas être chargée, le tunnel ne démarre pas.
 - La clé privée d'une machine est générée à sa création, affichée une fois, jamais stockée. La clé du serveur est hors dépôt, en mode 0600.
@@ -39,7 +52,7 @@
 - **Copie DNS incomplète par nature.** Le DNS public ne liste ni tous les sous-domaines ni tous les sélecteurs DKIM. Le joker vers le VPS peut capter un nom oublié, par exemple l'hôte d'un MX. Comparer la zone à l'export du fournisseur actuel avant de déléguer.
 - **Cookie d'accès transmis au service.** Pour une adresse protégée, le cookie Synunnel de cet hôte accompagne les requêtes jusqu'au service de la machine. Un service qui journalise ou renvoie les cookies l'exposerait jusqu'à son expiration.
 - **WebSocket.** Une connexion WebSocket déjà ouverte n'est pas recontrôlée à chaque message : retirer un invité ne la coupe pas.
-- **Ressources.** Pas de purge automatique du journal d'audit admin ; une requête anonyme sur l'API admin produit une écriture en base. Pas de quota sur le nombre d'adresses par compte.
+- **Ressources.** Une requête anonyme sur l'API d'administration produit une écriture en base (journal purgé après 90 jours par le rapprochement). Les limites de débit sont par compte, pas globales : une instance ouverte à beaucoup de comptes demanderait une limite globale en amont.
 - **Domaines déjà délégués.** Un domaine dont les serveurs de noms désignent déjà l'instance, sans zone chez elle, ne peut plus prouver sa propriété : repasser temporairement par un autre hébergeur DNS, ou demander à l'administrateur (`scripts/provision-site.py`).
 - **Proxy dans un conteneur.** Le pare-feu du tunnel bloque aussi le trafic transféré depuis `wg0` : un reverse proxy qui tournerait dans un bridge Docker au lieu de Caddy sur l'hôte demanderait une règle adaptée.
 - **Réutilisation des IP du tunnel.** L'IP d'une machine supprimée est réattribuable immédiatement, sans période de quarantaine.

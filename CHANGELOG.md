@@ -12,5 +12,7 @@ Première version publique, en alpha.
 - Routes Caddy liées à leur incarnation : une route périmée n'est jamais réautorisée.
 - Zones sans recouvrement entre comptes, déconnexion valable sur tous les appareils.
 - Installation en une commande sur Ubuntu 24.04, relançable sans perte de secrets.
+- API pour agents (`/api/v1`, OpenAPI) : domaines, DNS, machines par clé publique, adresses, partage ; jetons à permissions créés depuis le tableau de bord.
+- La base fait foi et les services convergent par un rapprochement automatique toutes les cinq minutes.
 - Interface claire et sobre.
 - Essai de bout en bout pour machine jetable ; tests unitaires hermétiques.

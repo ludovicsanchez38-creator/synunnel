@@ -31,6 +31,10 @@ La délégation est observée directement auprès d'un serveur de la zone parent
 
 **Synchronisation système.** L'assistant `/usr/local/sbin/synunnel-sync`, possédé par root et appelé par une entrée sudoers limitée, prend un verrou exclusif, lit pairs et routes dans une seule transaction SQLite, revalide noms, IP, ports et clés publiques, puis régénère `/etc/wireguard/wg0.conf` et `/etc/caddy/synunnel-routes.caddy`. Il valide Caddy avant de le recharger et applique WireGuard par `wg syncconf`, sans couper les autres pairs. Si le tunnel est arrêté, il le relance. En cas d'échec, l'ancien fichier est restauré.
 
+**Convergence.** La base fait foi. Une modification est vérifiée et écrite sous un seul verrou d'écriture SQLite, sans appel réseau ; PowerDNS, puis WireGuard et Caddy, sont mis à jour après la validation. Si l'un d'eux échoue, l'action répond « mise en service en cours » et `scripts/reconcile.py` (minuteur `synunnel-reconcile.timer`, toutes les cinq minutes, sous l'utilisateur `synunnel`) ramène chaque zone, les pairs et les routes sur l'état de la base. Il purge aussi les données de travail expirées.
+
+**API pour agents.** `synunnel/api.py` expose `/api/v1` (voir [API.md](API.md)). Les routes du tableau de bord et de l'API appellent les mêmes fonctions de `synunnel/actions.py` : aucune règle de sécurité n'est écrite deux fois.
+
 **Pare-feu du tunnel.** `wg0.conf` charge la table nftables `synunnel_wg` (`/etc/synunnel/wg0-firewall.nft`) en `PreUp`, avant la création de l'interface : seuls les paquets de réponse aux connexions ouvertes par le VPS entrent par `wg0`, et rien ne transite d'une machine à l'autre. Si la table ne se charge pas, `wg-quick` n'ouvre pas le tunnel.
 
 ## HTTPS et contrôle d'accès

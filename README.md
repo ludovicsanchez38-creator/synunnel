@@ -44,7 +44,7 @@ sudo env PUBLIC_IPV4=203.0.113.10 \
   ./scripts/install.sh
 ```
 
-Paramètres facultatifs : `PUBLIC_IPV6`, `SOA_RNAME` (par défaut `hostmaster.<DASHBOARD_HOST>.`), `REDIRECT_HOSTS` (noms supplémentaires redirigés vers le tableau de bord, séparés par des virgules), `RESERVED_DOMAINS` (domaines que les comptes ne pourront pas revendiquer), `MAX_DOMAINS_PER_USER` et `MAX_MACHINES_PER_USER`.
+Paramètres facultatifs : `PUBLIC_IPV6`, `SOA_RNAME` (par défaut `hostmaster.<DASHBOARD_HOST>.`), `REDIRECT_HOSTS` (noms supplémentaires redirigés vers le tableau de bord, séparés par des virgules), `RESERVED_DOMAINS` (domaines que les comptes ne pourront pas revendiquer), et les quotas `MAX_DOMAINS_PER_USER` (20), `MAX_MACHINES_PER_USER` (10), `MAX_ADDRESSES_PER_USER` (50), `MAX_RECORDS_PER_DOMAIN` (200).
 
 Le dépôt peut vivre ailleurs (le service est généré pour son emplacement réel), mais `/opt/synunnel` évite de modifier les droits d'un répertoire personnel. Le script vérifie les paramètres avant de toucher à la machine, installe les paquets, crée les secrets dans `/etc/synunnel/synunnel.env` (hors du dépôt), configure PowerDNS, Caddy, WireGuard et un pare-feu dédié au tunnel, puis démarre les services. On peut le relancer sans renouveler les secrets : les valeurs déjà enregistrées font foi. Pour changer un réglage ensuite, modifiez `/etc/synunnel/synunnel.env`, puis relancez le script ou `sudo systemctl restart synunnel`.
 
@@ -62,11 +62,16 @@ Ensuite, créez votre compte sur `https://tunnel.example.org/register` et approu
 
 **Publier une adresse.** Choisissez un nom (`@` pour la racine du domaine), la machine et le port local. Une adresse protégée exige la connexion à Synunnel ; son propriétaire peut ouvrir l'accès à une liste de comptes approuvés.
 
+## API pour agents
+
+Un agent IA ou un script peut tout faire sur un compte (domaines, DNS, machines, adresses, partage) avec un jeton créé depuis la page **Jetons d'API** : permissions cochées une à une, 7 ou 30 jours, révocable à tout moment. La clé privée d'une machine reste sur la machine : l'API ne reçoit que la clé publique. Guide et exemples : [docs/API.md](docs/API.md) ; description OpenAPI servie par l'instance sur `/api/v1/openapi.json`.
+
 ## Administration
 
 - [API d'administration](docs/API-ADMIN.md) : comptes en attente, approbation, refus.
 - `scripts/provision-site.py` et `scripts/create-machine-config.py` : rattachement d'un site ou d'une machine à un compte approuvé depuis le VPS, sans passer par le tableau de bord.
-- État des services : `sudo systemctl status pdns caddy wg-quick@wg0 synunnel`.
+- État des services : `sudo systemctl status pdns caddy wg-quick@wg0 synunnel synunnel-reconcile.timer`.
+- La base fait foi : si PowerDNS, WireGuard ou Caddy n'ont pas pu être mis à jour pendant une action, le rapprochement automatique (toutes les cinq minutes, `journalctl -u synunnel-reconcile`) termine le travail.
 - À sauvegarder régulièrement : `/var/lib/synunnel/`, `/var/lib/powerdns/`, `/etc/synunnel/`, `/etc/wireguard/` et `/var/lib/caddy/`.
 
 ## Développement
