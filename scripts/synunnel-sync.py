@@ -23,6 +23,7 @@ CADDYFILE_PATH = Path("/etc/caddy/Caddyfile")
 LOCK_PATH = Path("/run/synunnel-sync.lock")
 FIREWALL_PATH = Path("/etc/synunnel/wg0-firewall.nft")
 HOST_RE = re.compile(r"^[a-z0-9-]+(?:\.[a-z0-9-]+)+$")
+TOKEN_RE = re.compile(r"^[0-9a-f]{24}$")
 
 
 def run(*args: str, input: bytes | None = None) -> subprocess.CompletedProcess:
@@ -53,7 +54,7 @@ def wireguard_config(db: sqlite3.Connection) -> str:
     lines = [
         "[Interface]", "Address = 10.88.0.1/24", "ListenPort = 51820",
         f"PrivateKey = {private}",
-        f"PostUp = /usr/sbin/nft -f {FIREWALL_PATH}",
+        f"PreUp = /usr/sbin/nft -f {FIREWALL_PATH}",
         "PostDown = /usr/sbin/nft delete table inet synunnel_wg", "",
     ]
     for row in db.execute("SELECT ip,public_key FROM machines ORDER BY ip"):
@@ -69,13 +70,13 @@ def wireguard_config(db: sqlite3.Connection) -> str:
 def caddy_routes(db: sqlite3.Connection) -> str:
     lines = ["# Routes générées depuis la base Synunnel. Ne pas éditer à la main."]
     rows = db.execute(
-        "SELECT a.hostname,a.port,m.ip FROM addresses a "
+        "SELECT a.hostname,a.port,m.ip,a.route_token FROM addresses a "
         "JOIN domains d ON d.id=a.domain_id JOIN users u ON u.id=d.user_id "
         "JOIN machines m ON m.id=a.machine_id WHERE u.status='approved' ORDER BY a.hostname"
     )
     for n, row in enumerate(rows, 1):
-        host, port, ip = row
-        if not HOST_RE.fullmatch(host) or not 1 <= port <= 65535:
+        host, port, ip, token = row
+        if not HOST_RE.fullmatch(host) or not 1 <= port <= 65535 or not TOKEN_RE.fullmatch(token or ""):
             raise ValueError("Route Caddy invalide")
         parsed_ip = ipaddress.ip_address(ip)
         if parsed_ip not in ipaddress.ip_network("10.88.0.0/24"):
@@ -93,7 +94,7 @@ def caddy_routes(db: sqlite3.Connection) -> str:
             "    }",
             "    handle {",
             "        forward_auth 127.0.0.1:8000 {",
-            "            uri /internal/caddy/auth",
+            f"            uri /internal/caddy/auth?route={token}",
             "        }",
             f"        reverse_proxy {parsed_ip}:{port}",
             "    }",

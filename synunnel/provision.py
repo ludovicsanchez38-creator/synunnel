@@ -3,6 +3,7 @@
 import base64
 import binascii
 import ipaddress
+import secrets
 import shlex
 import subprocess
 from collections.abc import Callable
@@ -51,6 +52,11 @@ def provision_site(
     existing_domain = db.execute("SELECT id,user_id FROM domains WHERE name=?", (domain_name,)).fetchone()
     if existing_domain and existing_domain["user_id"] != user_id:
         raise ValueError("Domaine déjà rattaché à un autre compte.")
+    if existing_domain is None and db.execute(
+        "SELECT 1 FROM domains WHERE substr(?1, -length(name) - 1)='.' || name "
+        "OR substr(name, -length(?1) - 1)='.' || ?1", (domain_name,),
+    ).fetchone():
+        raise ValueError("Ce domaine recouvre une zone déjà gérée par l'instance.")
     copied = snapshot(domain_name, []) if existing_domain is None else []
     if existing_domain is None and not copied:
         raise ValueError("Copie DNS vide : zone non créée.")
@@ -106,9 +112,9 @@ def provision_site(
                     ).fetchone():
                         raise ValueError(f"Enregistrement DNS incompatible sur {hostname}.")
                     db.execute(
-                        "INSERT INTO addresses(domain_id,machine_id,hostname,port,protected,shared,created_at) "
-                        "VALUES(?,?,?,?,1,1,?)",
-                        (domain_id, machine_id, hostname, port, now_iso()),
+                        "INSERT INTO addresses(domain_id,machine_id,hostname,port,protected,shared,created_at,route_token) "
+                        "VALUES(?,?,?,?,1,1,?,?)",
+                        (domain_id, machine_id, hostname, port, now_iso(), secrets.token_hex(12)),
                     )
                 elif (address["domain_id"] != domain_id or address["machine_id"] != machine_id
                       or address["port"] != port or not address["protected"] or not address["shared"]):

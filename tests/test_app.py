@@ -73,6 +73,12 @@ def login_dashboard(client, email: str) -> None:
     assert response.status_code == 302
 
 
+def auth_path(app, hostname: str) -> str:
+    with app.app_context():
+        token = get_db().execute("SELECT route_token FROM addresses WHERE hostname=?", (hostname,)).fetchone()[0]
+    return f"/internal/caddy/auth?route={token}"
+
+
 def claim_domain(client, name: str) -> tuple[int, str]:
     response = client.post("/domains", data={
         "csrf_token": csrf(client), "domain": name, "mail_checked": "1", "selectors": "",
@@ -178,7 +184,7 @@ def test_ask_and_protected_address_callback_is_single_use(app):
     assert client.get("/internal/caddy/ask?domain=synunnel.fr").status_code == 204
     assert client.get("/internal/caddy/ask?domain=www.synunnel.com").status_code == 204
     browser = app.test_client()
-    denied = browser.get("/internal/caddy/auth", base_url="https://private.owner.example.net", headers={"X-Forwarded-Uri": "/hello"})
+    denied = browser.get(auth_path(app, "private.owner.example.net"), base_url="https://private.owner.example.net", headers={"X-Forwarded-Uri": "/hello"})
     assert denied.status_code == 302
     login_page = browser.get("/login", base_url="https://synunnel.fr")
     login_csrf = re.search(rb'name="csrf_token" value="([^"]+)"', login_page.data).group(1).decode()
@@ -194,7 +200,7 @@ def test_ask_and_protected_address_callback_is_single_use(app):
     assert first.headers["Location"] == "/hello"
     assert "Secure" in first.headers["Set-Cookie"] and "HttpOnly" in first.headers["Set-Cookie"]
     assert browser.get(callback.path + "?" + callback.query, base_url="https://private.owner.example.net").status_code == 403
-    assert browser.get("/internal/caddy/auth", base_url="https://private.owner.example.net").status_code == 204
+    assert browser.get(auth_path(app, "private.owner.example.net"), base_url="https://private.owner.example.net").status_code == 204
 
 
 def test_rate_limit_and_machine_private_key_not_persisted(app):
@@ -262,7 +268,7 @@ def test_shared_access_list_revocation_pending_and_other_owner(app):
     callback = urlsplit(approved.headers["Location"])
     assert callback.hostname == "private.shared.example.net"
     assert listed.get(callback.path + "?" + callback.query, base_url=host).status_code == 302
-    assert listed.get("/internal/caddy/auth", base_url=host).status_code == 204
+    assert listed.get(auth_path(app, "private.shared.example.net"), base_url=host).status_code == 204
     assert owner.get("/login", base_url="https://synunnel.fr", query_string={"next": next_url}).status_code == 302
 
     assert unlisted.get("/login", base_url="https://synunnel.fr", query_string={"next": next_url}).headers["Location"] == "/dashboard"
@@ -272,7 +278,7 @@ def test_shared_access_list_revocation_pending_and_other_owner(app):
                                            "password": "mot-de-passe-long-123"}).status_code == 302
     assert pending.post("/login", data={"csrf_token": token, "email": "pending@example.net",
                                         "password": "mot-de-passe-long-123", "next": next_url}).status_code == 403
-    assert pending.get("/internal/caddy/auth", base_url=host).status_code == 302
+    assert pending.get(auth_path(app, "private.shared.example.net"), base_url=host).status_code == 302
 
     admin = {"Authorization": "Bearer test-admin-token-only"}
     pending_id = next(item["id"] for item in owner.get("/admin/api/pending", headers=admin).json["pending"]
@@ -284,7 +290,7 @@ def test_shared_access_list_revocation_pending_and_other_owner(app):
     assert owner.post(path, data={"csrf_token": csrf(owner), "shared": "1",
                                   "emails": "pending@example.net"}).status_code == 302
     # Le navigateur conserve le cookie d'accès, mais le contrôle relit la liste.
-    assert listed.get("/internal/caddy/auth", base_url=host).status_code == 302
+    assert listed.get(auth_path(app, "private.shared.example.net"), base_url=host).status_code == 302
     with app.app_context():
         assert get_db().execute(
             "SELECT COUNT(*) FROM host_sessions WHERE hostname=?", ("private.shared.example.net",),
@@ -370,3 +376,73 @@ def test_logout_closes_protected_address_sessions(app):
     assert client.post("/logout", data={"csrf_token": csrf(client)}).status_code == 302
     with app.app_context():
         assert get_db().execute("SELECT COUNT(*) FROM host_sessions").fetchone()[0] == 0
+
+
+def test_stale_route_is_refused_after_address_is_recreated(app):
+    client = app.test_client()
+    user_id = register_approve_login(app, client, "routes@example.net")
+    domain_id = add_domain(client, "routes.example.net")
+    with app.app_context():
+        db = get_db()
+        for n, name in ((2, "ancienne"), (3, "nouvelle")):
+            db.execute("INSERT INTO machines(user_id,name,ip,public_key,created_at) VALUES(?,?,?,?,?)",
+                       (user_id, name, f"10.88.0.{n}", base64.b64encode(bytes([n]) * 32).decode(), "2026-09-29"))
+        db.commit()
+        old_machine, new_machine = [row[0] for row in db.execute("SELECT id FROM machines ORDER BY ip")]
+    form = {"csrf_token": csrf(client), "domain_id": domain_id, "name": "nas", "port": "5000"}
+    assert client.post("/addresses", data={**form, "machine_id": old_machine}).status_code == 302
+    stale = auth_path(app, "nas.routes.example.net")
+    with app.app_context():
+        address_id = get_db().execute("SELECT id FROM addresses").fetchone()[0]
+    assert client.post(f"/addresses/{address_id}/delete", data={"csrf_token": csrf(client)}).status_code == 302
+    assert client.post("/addresses", data={**form, "machine_id": new_machine}).status_code == 302
+    current = auth_path(app, "nas.routes.example.net")
+    assert stale != current
+    # Caddy aurait encore l'ancienne route en mémoire si son rechargement avait échoué : elle reste refusée.
+    assert client.get(stale, base_url="https://nas.routes.example.net").status_code == 403
+    assert client.get(current, base_url="https://nas.routes.example.net").status_code == 204
+    assert client.get("/internal/caddy/auth", base_url="https://nas.routes.example.net").status_code == 403
+
+
+def test_nested_domains_cannot_overlap_between_accounts(app):
+    parent = app.test_client()
+    child = app.test_client()
+    register_approve_login(app, parent, "parent@example.net")
+    register_approve_login(app, child, "enfant@example.net")
+    add_domain(parent, "famille.example")
+    for name in ("equipe.famille.example", "famille.example"):
+        response = child.post("/domains", data={
+            "csrf_token": csrf(child), "domain": name, "mail_checked": "1", "selectors": "",
+        })
+        assert response.headers["Location"].endswith("/dashboard")
+    # Dans l'autre sens : une sous-zone vérifiée bloque ensuite son parent.
+    add_domain(child, "atelier.autre.example")
+    response = parent.post("/domains", data={
+        "csrf_token": csrf(parent), "domain": "autre.example", "mail_checked": "1", "selectors": "",
+    })
+    assert response.headers["Location"].endswith("/dashboard")
+
+
+def test_logout_ends_other_dashboard_sessions(app):
+    first = app.test_client()
+    register_approve_login(app, first, "partout@example.net")
+    second = app.test_client()
+    response = second.post("/login", data={
+        "csrf_token": csrf(second), "email": "partout@example.net", "password": "mot-de-passe-long-123",
+    })
+    assert response.status_code == 302
+    assert second.get("/dashboard").status_code == 200
+    assert first.post("/logout", data={"csrf_token": csrf(first)}).status_code == 302
+    assert second.get("/dashboard").status_code == 302
+
+
+def test_reservation_added_after_claim_blocks_verification(app):
+    client = app.test_client()
+    register_approve_login(app, client, "tardif@example.net")
+    claim_id, proof = claim_domain(client, "tardif.example")
+    PROOFS["tardif.example"] = {proof}
+    app.config["RESERVED_DOMAINS"] = (*app.config["RESERVED_DOMAINS"], "tardif.example")
+    response = client.post(f"/claims/{claim_id}/verify", data={"csrf_token": csrf(client)})
+    assert "/claims/" in response.headers["Location"]
+    with app.app_context():
+        assert get_db().execute("SELECT COUNT(*) FROM domains").fetchone()[0] == 0

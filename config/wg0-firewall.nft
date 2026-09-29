@@ -1,5 +1,5 @@
 #!/usr/sbin/nft -f
-# Pare-feu de l'interface WireGuard de Synunnel, chargé à chaque démarrage de wg0.
+# Pare-feu de l'interface WireGuard de Synunnel, chargé avant chaque démarrage de wg0 (PreUp).
 # Le VPS ouvre les connexions vers les machines, jamais l'inverse : une machine du tunnel
 # ne peut joindre aucun service du VPS (SSH compris) ni une autre machine.
 # Table dédiée, indépendante d'UFW, qui s'applique même si UFW est désactivé.
@@ -8,7 +8,10 @@ delete table inet synunnel_wg
 table inet synunnel_wg {
     chain input {
         type filter hook input priority filter - 10; policy accept;
-        iifname "wg0" ct state established,related accept
+        # « reply » : paquet de réponse d'une connexion ouverte par le VPS. Une connexion ouverte
+        # par une machine du tunnel reste dans le sens « original » et ne passe jamais, même
+        # si elle existait avant le chargement de cette table.
+        iifname "wg0" ct direction reply accept
         iifname "wg0" counter drop
     }
     chain forward {

@@ -35,6 +35,16 @@ def test_system_domains_cannot_be_claimed_by_users():
         ["example.org"],
     )
     assert normalize_domain("autre.example", reserved) == "autre.example"
+    # Un parent d'hôte de l'instance est réservé au nom exact, pas ses autres sous-domaines.
+    under_suffix = system_reservations(["tunnel.example.co.uk", "ns1.example.co.uk"])
+    assert normalize_domain("voisin.co.uk", under_suffix) == "voisin.co.uk"
+    for name in ("example.co.uk", "co.uk", "tunnel.example.co.uk", "x.tunnel.example.co.uk"):
+        try:
+            normalize_domain(name, under_suffix)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"Nom de l'instance accepté : {name}")
     for name in ("synunnel.fr", "x.synunnel.fr", "synunnel.com", "www.synunnel.com",
                  "example.org", "home.example.org"):
         try:

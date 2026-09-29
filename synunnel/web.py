@@ -12,6 +12,7 @@ import time
 from functools import wraps
 from urllib.parse import quote, urlsplit
 
+import requests
 from argon2 import PasswordHasher
 from argon2.exceptions import VerifyMismatchError
 from flask import (
@@ -102,6 +103,19 @@ def _owned_machine(machine_id: int):
     if row is None:
         abort(404)
     return row
+
+
+def _refuse_overlap(db, domain: str) -> None:
+    """Refuse un domaine qui contient une zone existante ou qui est contenu dans l'une d'elles."""
+    row = db.execute(
+        "SELECT name FROM domains WHERE name=?1 OR substr(?1, -length(name) - 1)='.' || name "
+        "OR substr(name, -length(?1) - 1)='.' || ?1 LIMIT 1",
+        (domain,),
+    ).fetchone()
+    if row is not None:
+        if row["name"] == domain:
+            raise ValueError("Ce domaine est déjà enregistré.")
+        raise ValueError(f"Ce domaine recouvre la zone {row['name']}, déjà gérée par l'instance.")
 
 
 def _pdns(app: Flask) -> PowerDNS:
@@ -225,9 +239,11 @@ def create_app(config_override: dict | None = None) -> Flask:
     def before_request():
         g.user = None
         if "user_id" in session:
+            # La version de session change à chaque déconnexion : les autres navigateurs
+            # connectés au même compte perdent alors leur session.
             g.user = get_db().execute(
-                "SELECT id,email,status FROM users WHERE id=? AND status='approved'",
-                (session["user_id"],),
+                "SELECT id,email,status FROM users WHERE id=? AND status='approved' AND session_version=?",
+                (session["user_id"], session.get("sv", -1)),
             ).fetchone()
             if g.user is None:
                 session.clear()
@@ -319,6 +335,7 @@ def create_app(config_override: dict | None = None) -> Flask:
             return render_template("login.html", next_url=next_url), 403
         session.clear()
         session["user_id"] = row["id"]
+        session["sv"] = row["session_version"]
         session["csrf"] = secrets.token_urlsafe(32)
         session.permanent = True
         return _redirect_after_login(next_url, row["id"])
@@ -328,6 +345,7 @@ def create_app(config_override: dict | None = None) -> Flask:
         if g.user:
             # Se déconnecter ferme aussi les accès ouverts sur les adresses protégées.
             with get_db() as db:
+                db.execute("UPDATE users SET session_version=session_version+1 WHERE id=?", (g.user["id"],))
                 db.execute("DELETE FROM host_sessions WHERE user_id=?", (g.user["id"],))
                 db.execute("DELETE FROM access_codes WHERE user_id=?", (g.user["id"],))
         session.clear()
@@ -364,13 +382,15 @@ def create_app(config_override: dict | None = None) -> Flask:
                 raise ValueError("Au maximum 20 sélecteurs DKIM simples.")
             if not request.form.get("mail_checked"):
                 raise ValueError("Confirme la vérification des enregistrements mail et des sélecteurs DKIM.")
-            if db.execute("SELECT 1 FROM domains WHERE name=?", (domain,)).fetchone():
-                raise ValueError("Ce domaine est déjà enregistré.")
-            owned = db.execute("SELECT COUNT(*) FROM domains WHERE user_id=?", (g.user["id"],)).fetchone()[0]
-            pending = db.execute("SELECT COUNT(*) FROM domain_claims WHERE user_id=?", (g.user["id"],)).fetchone()[0]
-            if owned + pending >= app.config["MAX_DOMAINS_PER_USER"]:
-                raise ValueError("Nombre maximal de domaines atteint pour ce compte.")
             with db:
+                db.execute("BEGIN IMMEDIATE")
+                _refuse_overlap(db, domain)
+                owned = db.execute("SELECT COUNT(*) FROM domains WHERE user_id=?", (g.user["id"],)).fetchone()[0]
+                pending = db.execute(
+                    "SELECT COUNT(*) FROM domain_claims WHERE user_id=? AND name<>?", (g.user["id"], domain),
+                ).fetchone()[0]
+                if owned + pending >= app.config["MAX_DOMAINS_PER_USER"]:
+                    raise ValueError("Nombre maximal de domaines atteint pour ce compte.")
                 db.execute(
                     "INSERT INTO domain_claims(user_id,name,token,selectors,created_at) VALUES(?,?,?,?,?) "
                     "ON CONFLICT(user_id,name) DO UPDATE SET selectors=excluded.selectors",
@@ -416,8 +436,9 @@ def create_app(config_override: dict | None = None) -> Flask:
         domain = claim["name"]
         db = get_db()
         try:
-            if db.execute("SELECT 1 FROM domains WHERE name=?", (domain,)).fetchone():
-                raise ValueError("Ce domaine a déjà été vérifié par un autre compte.")
+            # Une réservation ajoutée après la demande s'applique aussi à la vérification.
+            normalize_domain(domain, app.config["RESERVED_DOMAINS"])
+            _refuse_overlap(db, domain)
             if f"synunnel-verification={claim['token']}" not in ownership_proof(domain):
                 raise ValueError("Enregistrement de vérification introuvable. S'il vient d'être ajouté, "
                                  "réessaie dans quelques minutes.")
@@ -430,6 +451,8 @@ def create_app(config_override: dict | None = None) -> Flask:
                 pdns.create_zone(domain)
             try:
                 with db:
+                    db.execute("BEGIN IMMEDIATE")
+                    _refuse_overlap(db, domain)
                     domain_id = db.execute(
                         "INSERT INTO domains(user_id,name,created_at) VALUES(?,?,?)",
                         (g.user["id"], domain, now_iso()),
@@ -448,6 +471,10 @@ def create_app(config_override: dict | None = None) -> Flask:
                 raise
         except (ValueError, sqlite3.IntegrityError) as exc:
             flash(str(exc), "error")
+            return redirect(url_for("claim_detail", claim_id=claim_id))
+        except requests.RequestException:
+            flash("Le serveur DNS de l'instance a refusé la création de la zone. Réessaie ou préviens "
+                  "l'administrateur.", "error")
             return redirect(url_for("claim_detail", claim_id=claim_id))
         flash(f"Domaine vérifié. Zone {domain} créée avec {len(snapshot)} enregistrements repris. "
               "Vérifie-la avant délégation.", "success")
@@ -518,23 +545,27 @@ def create_app(config_override: dict | None = None) -> Flask:
             flash("Nom de machine invalide.", "error")
             return redirect(url_for("dashboard"))
         db = get_db()
-        owned = db.execute("SELECT COUNT(*) FROM machines WHERE user_id=?", (g.user["id"],)).fetchone()[0]
-        if owned >= app.config["MAX_MACHINES_PER_USER"]:
-            flash("Nombre maximal de machines atteint pour ce compte.", "error")
-            return redirect(url_for("dashboard"))
         private_key, public_key = generate_keypair()
-        used = {row[0] for row in db.execute("SELECT ip FROM machines")}
-        ip = next((f"10.88.0.{n}" for n in range(2, 255) if f"10.88.0.{n}" not in used), None)
-        if ip is None:
-            flash("Plage d'adresses WireGuard épuisée.", "error")
-            return redirect(url_for("dashboard"))
         try:
             with db:
+                # Quota et choix de l'IP sous verrou d'écriture : deux ajouts simultanés ne
+                # peuvent ni dépasser le quota ni viser la même adresse.
+                db.execute("BEGIN IMMEDIATE")
+                owned = db.execute("SELECT COUNT(*) FROM machines WHERE user_id=?", (g.user["id"],)).fetchone()[0]
+                if owned >= app.config["MAX_MACHINES_PER_USER"]:
+                    raise ValueError("Nombre maximal de machines atteint pour ce compte.")
+                used = {row[0] for row in db.execute("SELECT ip FROM machines")}
+                ip = next((f"10.88.0.{n}" for n in range(2, 255) if f"10.88.0.{n}" not in used), None)
+                if ip is None:
+                    raise ValueError("Plage d'adresses WireGuard épuisée.")
                 cursor = db.execute(
                     "INSERT INTO machines(user_id,name,ip,public_key,created_at) VALUES(?,?,?,?,?)",
                     (g.user["id"], name, ip, public_key, now_iso()),
                 )
             _sync_runtime(app)
+        except ValueError as exc:
+            flash(str(exc), "error")
+            return redirect(url_for("dashboard"))
         except (sqlite3.IntegrityError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
             if "cursor" in locals():
                 with db:
@@ -590,9 +621,10 @@ def create_app(config_override: dict | None = None) -> Flask:
                 raise ValueError("Un enregistrement DNS incompatible existe déjà pour ce nom.")
             with db:
                 cursor = db.execute(
-                    "INSERT INTO addresses(domain_id,machine_id,hostname,port,protected,created_at) "
-                    "VALUES(?,?,?,?,?,?)",
-                    (domain_id, machine_id, hostname, port, int(bool(request.form.get("protected"))), now_iso()),
+                    "INSERT INTO addresses(domain_id,machine_id,hostname,port,protected,created_at,route_token) "
+                    "VALUES(?,?,?,?,?,?,?)",
+                    (domain_id, machine_id, hostname, port, int(bool(request.form.get("protected"))), now_iso(),
+                     secrets.token_hex(12)),
                 )
                 _sync_zone(app, db, domain)
             try:
@@ -725,11 +757,14 @@ def create_app(config_override: dict | None = None) -> Flask:
     @app.get("/internal/caddy/auth")
     def caddy_auth():
         hostname = request.host.split(":", 1)[0].lower()
+        # Le jeton identifie la route exacte que Caddy s'apprête à suivre : une route périmée
+        # (adresse supprimée puis recréée vers une autre machine) ne correspond plus à rien.
+        route = request.args.get("route", "")
         row = get_db().execute(
             "SELECT a.protected, d.user_id FROM addresses a "
             "JOIN domains d ON d.id=a.domain_id JOIN users u ON u.id=d.user_id "
-            "WHERE a.hostname=? AND u.status='approved'",
-            (hostname,),
+            "WHERE a.hostname=? AND a.route_token=? AND u.status='approved'",
+            (hostname, route),
         ).fetchone()
         if row is None:
             return "", 403

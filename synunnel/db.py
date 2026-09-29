@@ -12,7 +12,8 @@ CREATE TABLE IF NOT EXISTS users (
     email TEXT NOT NULL UNIQUE,
     password_hash TEXT NOT NULL,
     status TEXT NOT NULL CHECK(status IN ('pending', 'approved')),
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    session_version INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS blocked_emails (
     email TEXT PRIMARY KEY,
@@ -59,7 +60,8 @@ CREATE TABLE IF NOT EXISTS addresses (
     port INTEGER NOT NULL CHECK(port BETWEEN 1 AND 65535),
     protected INTEGER NOT NULL DEFAULT 0,
     shared INTEGER NOT NULL DEFAULT 0 CHECK(shared IN (0, 1)),
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    route_token TEXT NOT NULL DEFAULT (lower(hex(randomblob(12))))
 );
 CREATE INDEX IF NOT EXISTS idx_addresses_host ON addresses(hostname);
 CREATE TABLE IF NOT EXISTS address_grants (
@@ -129,6 +131,14 @@ def init_db() -> None:
     db.executescript(SCHEMA)
     # Migration des bases du premier MVP. Le verrou sérialise deux workers au démarrage.
     db.execute("BEGIN IMMEDIATE")
-    if "shared" not in {row[1] for row in db.execute("PRAGMA table_info(addresses)")}:
+    address_columns = {row[1] for row in db.execute("PRAGMA table_info(addresses)")}
+    if "shared" not in address_columns:
         db.execute("ALTER TABLE addresses ADD COLUMN shared INTEGER NOT NULL DEFAULT 0 CHECK(shared IN (0, 1))")
+    if "route_token" not in address_columns:
+        # Chaque incarnation d'une adresse porte son propre jeton : une ancienne route encore
+        # chargée dans Caddy ne peut pas être réautorisée par une adresse recréée au même nom.
+        db.execute("ALTER TABLE addresses ADD COLUMN route_token TEXT")
+        db.execute("UPDATE addresses SET route_token=lower(hex(randomblob(12))) WHERE route_token IS NULL")
+    if "session_version" not in {row[1] for row in db.execute("PRAGMA table_info(users)")}:
+        db.execute("ALTER TABLE users ADD COLUMN session_version INTEGER NOT NULL DEFAULT 0")
     db.commit()

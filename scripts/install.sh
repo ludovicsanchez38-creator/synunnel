@@ -18,6 +18,11 @@ fi
 #     NS1_HOST=ns1.example.org NS2_HOST=ns2.example.org ACME_EMAIL=admin@example.org ./scripts/install.sh
 # Lancements suivants : les valeurs déjà écrites dans /etc/synunnel/synunnel.env font foi.
 if [[ -e /etc/synunnel/synunnel.env ]]; then
+  if [[ -L /etc/synunnel/synunnel.env || "$(stat -c %U /etc/synunnel/synunnel.env)" != root ]] \
+     || (( 8#$(stat -c %a /etc/synunnel/synunnel.env) & 8#022 )); then
+    printf '/etc/synunnel/synunnel.env doit être un fichier de root, non modifiable par un autre compte.\n' >&2
+    exit 1
+  fi
   set -a
   # Fichier généré par ce script lors d'un lancement précédent, possédé par root.
   source /etc/synunnel/synunnel.env
@@ -34,13 +39,36 @@ fi
 PUBLIC_IPV6="${PUBLIC_IPV6:-}"
 SOA_RNAME="${SOA_RNAME:-hostmaster.${DASHBOARD_HOST}.}"
 REDIRECT_HOSTS="${REDIRECT_HOSTS:-}"
+RESERVED_DOMAINS="${RESERVED_DOMAINS:-}"
+MAX_DOMAINS_PER_USER="${MAX_DOMAINS_PER_USER:-20}"
+MAX_MACHINES_PER_USER="${MAX_MACHINES_PER_USER:-10}"
+HOSTNAME_RE='^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$'
+for list in REDIRECT_HOSTS RESERVED_DOMAINS; do
+  IFS=, read -ra names <<< "${!list}"
+  for name in "${names[@]}"; do
+    if [[ ! "$name" =~ $HOSTNAME_RE ]]; then
+      printf '%s contient un nom invalide : %s\n' "$list" "$name" >&2
+      exit 1
+    fi
+  done
+done
+for quota in MAX_DOMAINS_PER_USER MAX_MACHINES_PER_USER; do
+  if [[ ! "${!quota}" =~ ^[1-9][0-9]{0,2}$ ]]; then
+    printf '%s doit être un entier entre 1 et 999.\n' "$quota" >&2
+    exit 1
+  fi
+done
+if [[ ! "$SOA_RNAME" =~ ^[a-z0-9.-]+\.$ || "$SOA_RNAME" == *..* ]]; then
+  printf 'SOA_RNAME invalide.\n' >&2
+  exit 1
+fi
 if [[ ! "$REPO_DIR" =~ ^[A-Za-z0-9._/-]+$ ]]; then
   printf 'Le chemin du dépôt ne doit contenir ni espace ni caractère spécial : %s\n' "$REPO_DIR" >&2
   exit 1
 fi
 python3 -c 'import ipaddress,sys; ipaddress.IPv4Address(sys.argv[1]); sys.argv[2] and ipaddress.IPv6Address(sys.argv[2])' "$PUBLIC_IPV4" "$PUBLIC_IPV6"
 for hostname in "$DASHBOARD_HOST" "$NS1_HOST" "$NS2_HOST"; do
-  if [[ ! "$hostname" =~ ^[a-z0-9.-]+$ || "$hostname" != *.* ]]; then
+  if [[ ! "$hostname" =~ $HOSTNAME_RE ]]; then
     printf 'Nom de serveur invalide : %s\n' "$hostname" >&2
     exit 1
   fi
@@ -64,6 +92,12 @@ fi
 parent="$(dirname "$REPO_DIR")"
 while [[ "$parent" != / ]]; do
   if [[ "$(stat -c %A "$parent")" != ?????????[xt] ]]; then
+    if getfacl -cp "$parent" 2>/dev/null | grep -Eq '^(user|group):[^:]+:|^mask::' \
+       && ! getfacl -cp "$parent" | grep -q '^user:synunnel:'; then
+      # Ajouter une entrée recalculerait le masque et pourrait rendre des droits à d'autres comptes.
+      printf '%s porte déjà des ACL : clone plutôt le dépôt dans /opt/synunnel.\n' "$parent" >&2
+      exit 1
+    fi
     setfacl -m u:synunnel:--x "$parent"
   fi
   parent="$(dirname "$parent")"
@@ -99,10 +133,14 @@ NS2_HOST=$NS2_HOST
 SOA_RNAME=$SOA_RNAME
 REDIRECT_HOSTS=$REDIRECT_HOSTS
 ACME_EMAIL=$ACME_EMAIL
+RESERVED_DOMAINS=$RESERVED_DOMAINS
+MAX_DOMAINS_PER_USER=$MAX_DOMAINS_PER_USER
+MAX_MACHINES_PER_USER=$MAX_MACHINES_PER_USER
 SYNC_COMMAND='/usr/bin/sudo -n /usr/local/sbin/synunnel-sync'
 EOF
 fi
-for setting in DASHBOARD_HOST NS1_HOST NS2_HOST SOA_RNAME REDIRECT_HOSTS ACME_EMAIL; do
+for setting in DASHBOARD_HOST NS1_HOST NS2_HOST SOA_RNAME REDIRECT_HOSTS ACME_EMAIL \
+  RESERVED_DOMAINS MAX_DOMAINS_PER_USER MAX_MACHINES_PER_USER; do
   if ! grep -q "^${setting}=" /etc/synunnel/synunnel.env; then
     printf '%s=%s\n' "$setting" "${!setting}" >> /etc/synunnel/synunnel.env
   fi
@@ -201,7 +239,11 @@ curl --silent --fail http://127.0.0.1:8000/login >/dev/null
 # Le tunnel doit revenir seul après un redémarrage du VPS.
 systemctl enable wg-quick@wg0
 # Mise à niveau d'une instance dont wg0 tournait déjà : on applique le pare-feu sans couper le tunnel.
-if ip link show wg0 >/dev/null 2>&1; then nft -f /etc/synunnel/wg0-firewall.nft; fi
+if ip link show wg0 >/dev/null 2>&1 && ! nft -f /etc/synunnel/wg0-firewall.nft; then
+  systemctl stop wg-quick@wg0
+  printf 'Pare-feu du tunnel non appliqué : wg0 arrêté par précaution.\n' >&2
+  exit 1
+fi
 caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
 systemctl enable --now caddy
 systemctl reload caddy

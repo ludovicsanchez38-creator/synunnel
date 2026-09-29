@@ -32,14 +32,31 @@ def configured_nameservers() -> tuple[str, str]:
 
 
 def system_reservations(hosts: list[str], extra: list[str] | None = None) -> tuple[str, ...]:
-    """Noms que les comptes ne peuvent pas revendiquer : hôtes de l'instance et leurs domaines parents."""
+    """Noms que les comptes ne peuvent pas revendiquer.
+
+    Un nom simple est réservé avec tout ce qu'il contient ; un nom préfixé par « = » ne
+    l'est que lui-même. Les hôtes de l'instance et RESERVED_DOMAINS forment des sous-arbres ;
+    leurs parents ne sont réservés qu'au nom exact, pour ne pas bloquer tout « co.uk »
+    quand l'instance vit sous « example.co.uk ».
+    """
     reserved: set[str] = set()
     for host in [*hosts, *(extra or [])]:
         labels = host.strip().rstrip(".").lower().split(".")
         if len(labels) < 2 or not all(labels):
             continue
-        reserved.update(".".join(labels[i:]) for i in range(len(labels) - 1))
+        reserved.add(".".join(labels))
+        reserved.update("=" + ".".join(labels[i:]) for i in range(1, len(labels) - 1))
     return tuple(sorted(reserved))
+
+
+def is_reserved(domain: str, reserved: tuple[str, ...]) -> bool:
+    for name in reserved:
+        if name.startswith("="):
+            if domain == name[1:]:
+                return True
+        elif domain == name or domain.endswith(f".{name}"):
+            return True
+    return False
 
 
 def normalize_domain(value: str, reserved: tuple[str, ...] = ()) -> str:
@@ -51,7 +68,7 @@ def normalize_domain(value: str, reserved: tuple[str, ...] = ()) -> str:
     labels = result.split(".")
     if len(labels) < 2 or len(result) > 253 or any(not LABEL_RE.fullmatch(x) for x in labels):
         raise ValueError("Nom de domaine invalide.")
-    if any(result == name or result.endswith(f".{name}") for name in reserved):
+    if is_reserved(result, reserved):
         raise ValueError("Ce domaine est réservé par l'instance.")
     return result
 
@@ -167,7 +184,8 @@ VERIFY_LABEL = "_synunnel"
 def ownership_proof(domain: str) -> set[str]:
     """Lit les TXT _synunnel.<domaine> directement chez les serveurs qui font autorité.
 
-    On contourne les caches pour qu'un enregistrement ajouté il y a une minute soit vu.
+    La dernière question part vers ces serveurs, sans résolveur intermédiaire : un
+    enregistrement ajouté il y a une minute est vu sans attendre l'expiration d'un cache.
     """
     target = dns.name.from_text(f"{VERIFY_LABEL}.{domain}.")
     resolver = dns.resolver.Resolver(configure=True)
@@ -185,20 +203,27 @@ def ownership_proof(domain: str) -> set[str]:
                 addresses.extend(item.to_text() for item in resolver.resolve(server, kind))
             except dns.exception.DNSException:
                 continue
+    values: set[str] = set()
+    answered = False
     for address in addresses[:8]:
         try:
-            response = dns.query.udp(dns.message.make_query(target, "TXT"), address, timeout=3)
+            response, _tcp = dns.query.udp_with_fallback(dns.message.make_query(target, "TXT"), address, timeout=3)
         except (dns.exception.DNSException, OSError):
             continue
-        if response.rcode() not in (dns.rcode.NOERROR, dns.rcode.NXDOMAIN):
+        # Seule une réponse faisant autorité compte ; les serveurs secondaires en retard
+        # n'empêchent pas la preuve si un autre serveur de la zone la porte déjà.
+        if not response.flags & dns.flags.AA or response.rcode() not in (dns.rcode.NOERROR, dns.rcode.NXDOMAIN):
             continue
-        return {
+        answered = True
+        values.update(
             b"".join(item.strings).decode("utf-8", "replace")
             for rrset in response.answer
             if rrset.rdtype == dns.rdatatype.TXT and rrset.name == target
             for item in rrset
-        }
-    raise ValueError("Aucun serveur DNS du domaine n'a répondu ; réessaie dans quelques minutes.")
+        )
+    if not answered:
+        raise ValueError("Aucun serveur DNS du domaine n'a répondu ; réessaie dans quelques minutes.")
+    return values
 
 
 class PowerDNS:

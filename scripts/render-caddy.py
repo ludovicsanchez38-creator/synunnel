@@ -21,7 +21,7 @@ def render_caddy(template: str, dashboard: str, redirect_hosts: str, email: str)
         raise ValueError("Hôtes ou adresse ACME invalides.")
     if not hosts:
         # Aucun nom de redirection : on retire le bloc entier plutôt qu'un matcher vide.
-        template = re.sub(r"\n *# __REDIRECT_START__\n.*?# __REDIRECT_END__\n", "\n", template, flags=re.S)
+        template = re.sub(r"\n *# __REDIRECT_START__\n.*?# __REDIRECT_END__\n", "\n", template, flags=re.DOTALL)
     return (template.replace("__DASHBOARD_HOST__", dashboard.lower())
             .replace("__REDIRECT_HOSTS__", " ".join(hosts))
             .replace("__ACME_EMAIL__", email))

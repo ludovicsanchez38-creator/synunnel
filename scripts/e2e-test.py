@@ -82,6 +82,7 @@ def main() -> None:
     zone_created = False
     netns_created = False
     caddy_changed = False
+    completed = False
     try:
         pdns.create_zone(DOMAIN)
         zone_created = True
@@ -107,14 +108,14 @@ def main() -> None:
                 (user_id, "test-local", "10.88.0.2", public, "2026-09-27T00:00:00Z"),
             ).lastrowid
             db.execute(
-                "INSERT INTO addresses(domain_id,machine_id,hostname,port,protected,created_at) "
-                "VALUES(?,?,?,?,0,?)",
-                (domain_id, machine_id, HOST, 18080, "2026-09-27T00:00:00Z"),
+                "INSERT INTO addresses(domain_id,machine_id,hostname,port,protected,created_at,route_token) "
+                "VALUES(?,?,?,?,0,?,?)",
+                (domain_id, machine_id, HOST, 18080, "2026-09-27T00:00:00Z", secrets.token_hex(12)),
             )
             db.execute(
-                "INSERT INTO addresses(domain_id,machine_id,hostname,port,protected,created_at) "
-                "VALUES(?,?,?,?,1,?)",
-                (domain_id, machine_id, PROTECTED, 18080, "2026-09-27T00:00:00Z"),
+                "INSERT INTO addresses(domain_id,machine_id,hostname,port,protected,created_at,route_token) "
+                "VALUES(?,?,?,?,1,?,?)",
+                (domain_id, machine_id, PROTECTED, 18080, "2026-09-27T00:00:00Z", secrets.token_hex(12)),
             )
             pdns.sync_zone(db, domain_id, DOMAIN, values["PUBLIC_IPV4"], values["PUBLIC_IPV6"])
         run("/usr/local/sbin/synunnel-sync")
@@ -222,6 +223,7 @@ def main() -> None:
         if rejected.returncode == 0:
             raise AssertionError("Le nom d'hôte non déclaré a été accepté.")
         print("Nom d'hôte non déclaré refusé au TLS : OK")
+        completed = True
     finally:
         errors: list[str] = []
 
@@ -252,8 +254,9 @@ def main() -> None:
         if http_server:
             attempt("serveur HTTP", stop_http)
         if netns_created:
-            attempt("espace réseau", lambda: run("ip", "netns", "delete", NS, check=False))
-            attempt("interface veth", lambda: run("ip", "link", "delete", VETH_HOST, check=False))
+            attempt("espace réseau", lambda: run("ip", "netns", "delete", NS))
+            if VETH_HOST in run("ip", "-o", "link", "show").stdout:
+                attempt("interface veth", lambda: run("ip", "link", "delete", VETH_HOST))
         attempt("compte de test", drop_user)
         if zone_created:
             attempt("zone PowerDNS", lambda: pdns.delete_zone(DOMAIN))
@@ -265,6 +268,8 @@ def main() -> None:
         db.close()
         if errors:
             print("Remise en état incomplète, à vérifier à la main :\n- " + "\n- ".join(errors))
+            if completed:
+                raise SystemExit(1)
 
 if __name__ == "__main__":
     main()
