@@ -490,6 +490,59 @@ def main() -> None:
         if after != "302":
             raise AssertionError(f"Le cookie de l'invité reste valable après sa sortie ({after}).")
         print("Sortie de l'invité par /__synunnel/logout, cookie rejoué refusé : OK")
+
+        # Les chemins réservés ne mènent jamais à l'application par une traversée.
+        for sneaky in ("/__synunnel/../dashboard", "/__synunnel/%2e%2e/api/v1/me", "/__synunnel/..%2fapi/v1/me"):
+            reply = run(*base, "--path-as-is", "--resolve", f"{PROTECTED}:443:{values['PUBLIC_IPV4']}",
+                        "--header", f"Authorization: Bearer {api_token}", "--write-out", "\\n%{http_code}",
+                        f"https://{PROTECTED}{sneaky}", check=False).stdout
+            # Seules réponses admises : la redirection de forward_auth ou un 404 générique, jamais une page
+            # de l'application (toutes portent « Synunnel ») ni une réponse de l'API.
+            if EMAIL in reply or reply.rstrip().endswith("\n200") or "Synunnel" in reply:
+                raise AssertionError(f"Traversée de /__synunnel/ vers l'application : {sneaky}")
+        print("Traversées de /__synunnel/ refusées : OK")
+
+        # Mot de passe oublié par mail, de bout en bout, et journal de Caddy expurgé sur un 502.
+        admin = ["--header", f"Authorization: Bearer {values['ADMIN_TOKEN']}", "--header",
+                 "Content-Type: application/json"]
+        run(*base, "--resolve", resolve, *admin, "--data", json.dumps({"email": EMAIL}),
+            f"https://{dashboard_host}/admin/api/users/{user_id}/verify-email")
+        jar.unlink(missing_ok=True)
+        before = len(inbox)
+        _, _, html = web("/forgot")
+        web("/forgot", {"csrf_token": csrf_of(html), "email": EMAIL})
+        for _ in range(40):
+            if len(inbox) > before:
+                break
+            time.sleep(0.5)
+        if len(inbox) <= before:
+            raise AssertionError("Aucun lien de réinitialisation n'est arrivé dans la boîte simulée.")
+        reset_body = email.message_from_string(inbox[-1]).get_payload(decode=True).decode("utf-8")
+        link = re.search(r"https://\S+/reset\?token=([A-Za-z0-9_-]+)", reset_body)
+        if not link or not link.group(0).startswith(f"https://{dashboard_host}/"):
+            raise AssertionError("Le lien de réinitialisation n'a pas la forme attendue.")
+        since = time.strftime("%Y-%m-%d %H:%M:%S")
+        run("systemctl", "stop", "synunnel")
+        down = run(*base, "--resolve", resolve, "--output", "/dev/null", "--write-out", "%{http_code}",
+                   link.group(0), check=False).stdout
+        run("systemctl", "start", "synunnel")
+        for _ in range(30):
+            if web("/login")[0] == 200:
+                break
+            time.sleep(0.5)
+        logged = run("journalctl", "-u", "caddy", "--since", since, "--no-pager", check=False).stdout
+        if down != "502" or link.group(1) in logged:
+            raise AssertionError(f"Journal de Caddy non expurgé sur une erreur ({down}).")
+        print("Journal de Caddy expurgé du jeton de réinitialisation sur un 502 : OK")
+        new_password = secrets.token_urlsafe(24)
+        _, _, html = web(link.group(0).replace(f"https://{dashboard_host}", ""))
+        status, _, _ = web("/reset", {"csrf_token": csrf_of(html), "token": link.group(1), "email": EMAIL,
+                                      "password": new_password})
+        _, _, html = web("/login")
+        status, location, _ = web("/login", {"csrf_token": csrf_of(html), "email": EMAIL, "password": new_password})
+        if status != 302 or not location.endswith("/dashboard"):
+            raise AssertionError(f"Mot de passe oublié par mail : nouvelle connexion refusée ({status} {location}).")
+        print("Mot de passe oublié par mail (lien lu dans la boîte simulée) : OK")
         completed = True
     finally:
         errors: list[str] = []
