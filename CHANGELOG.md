@@ -1,0 +1,14 @@
+# Historique des versions
+
+## 0.1.0a1 - 29 septembre 2026
+
+Première version publique, en alpha.
+
+- Tableau de bord : comptes validés par l'administrateur, domaines, machines WireGuard, adresses publiques ou protégées, accès partagé avec des comptes invités.
+- DNS autoritaire PowerDNS, avec recopie des enregistrements publics avant délégation.
+- Preuve de propriété d'un domaine par enregistrement TXT, lue chez ses serveurs faisant autorité.
+- HTTPS automatique par Caddy (certificats à la demande, contrôlés par l'application).
+- Pare-feu nftables dédié au tunnel : les machines ne joignent ni le VPS ni les autres machines.
+- Installation en une commande sur Ubuntu 24.04, relançable sans perte de secrets.
+- Interface claire et sobre.
+- Essai de bout en bout pour machine jetable ; tests unitaires hermétiques.

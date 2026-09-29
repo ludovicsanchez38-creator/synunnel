@@ -1,32 +1,51 @@
-# Sécurité du MVP
+# Sécurité
 
-## Couvert et vérifié
+## Protections en place
 
-- Mots de passe hachés avec Argon2id ; aucun mot de passe en clair dans SQLite.
-- Session du tableau de bord en cookie `Secure`, `HttpOnly`, `SameSite=Lax`, sans domaine partagé ; actions web protégées par un jeton CSRF.
-- Inscription et connexion limitées par IP ou adresse mail sur des fenêtres de temps enregistrées en SQLite.
-- Un compte neuf reste `pending` et n'accède à aucune ressource. Un refus supprime le compte et place son adresse mail dans une liste de blocage.
-- Les requêtes sur domaines, enregistrements, machines et adresses filtrent par propriétaire. Les tests automatisés essayent explicitement des lectures et modifications entre deux comptes.
-- Un nom de domaine est unique ; `synoptia.fr`, `synunnel.fr`, `synunnel.com` et leurs sous-domaines sont réservés. Les enregistrements CNAME ne peuvent pas partager un nom avec un autre type. Une adresse ordinaire ne peut écraser un A/AAAA/CNAME existant ; l'adresse racine `@` remplace explicitement les A/AAAA dans la zone active, sans effacer les MX/TXT copiés.
-- API d'administration avec jeton long hors dépôt, comparaison à temps constant et journal de chaque appel, y compris les refus. L'API n'envoie pas de message.
-- API PowerDNS et application liées à localhost. PowerDNS n'est pas récursif, refuse AXFR et ne touche pas au résolveur local. UFW n'ouvre que SSH, 53 TCP/UDP, 80/443 TCP et 51820 UDP.
-- Le service web tourne sous `synunnel`, PowerDNS sous `pdns`, Caddy sous `caddy`. Seul l'assistant de synchronisation root et `wg-quick` disposent des privilèges nécessaires. L'assistant valide ses entrées avant d'écrire les fichiers système.
-- Caddy n'émet un certificat à la demande que si `ask` autorise le nom. `forward_auth` vérifie toutes les routes à chaque requête, même publiques, pour refuser une route supprimée encore chargée dans Caddy.
-- La clé privée du client est générée au moment de l'ajout de machine, affichée une fois puis perdue ; seuls la clé publique, l'IP interne et le nom restent en base. La clé privée du serveur est hors dépôt, en mode 0600.
-- Une adresse protégée n'est partagée qu'avec les adresses mail inscrites par son propriétaire **et** les comptes approuvés correspondants. Le propriétaire garde l'accès. L'autorisation est relue à chaque requête, même avec un cookie d'accès encore présent. Toute modification de liste supprime les codes et sessions d'accès de cet hôte. Les tests couvrent l'accès listé, non listé, en attente/refusé, retiré et inter-propriétaires.
-- Le CLI de provisionnement refuse un compte non approuvé, exige la copie du DNS public avant une nouvelle zone, et crée les adresses en mode protégé/partagé avec une liste vide. La configuration privée du pair TOOGGY est destinée à un pipe SSH sans affichage ; le destinataire refuse les routes par défaut et les hooks WireGuard.
+**Comptes et sessions**
+- Mots de passe hachés avec Argon2id ; aucun mot de passe en clair en base.
+- Session du tableau de bord en cookie `__Host-`, `Secure`, `HttpOnly`, `SameSite=Lax`, sans domaine partagé ; toutes les actions web portent un jeton CSRF, renouvelé à la connexion.
+- Inscription et connexion limitées par IP et par adresse mail. Les réponses publiques ne révèlent pas si une adresse possède déjà un compte, et la connexion d'un compte inexistant coûte le même calcul qu'une vraie tentative.
+- Un compte neuf reste en attente et n'a accès à rien. Un refus supprime le compte et bloque son adresse.
+- La déconnexion ferme aussi les accès ouverts sur les adresses protégées, sur tous les appareils.
 
-## Points encore ouverts
+**Domaines**
+- Un domaine n'est créé qu'après une **preuve de propriété** : un TXT `_synunnel.<domaine>` propre au compte, lu directement chez les serveurs qui font autorité pour le domaine (sans cache). Tant que la preuve manque, aucune zone n'existe et le nom reste ouvert à son véritable propriétaire ; la première preuve valide l'emporte et annule les demandes concurrentes.
+- Les noms de l'instance (tableau de bord, serveurs de noms, redirections), leurs domaines parents et ceux de `RESERVED_DOMAINS` ne peuvent pas être revendiqués.
+- Un CNAME ne partage jamais son nom ; une adresse ne peut écraser un A, AAAA ou CNAME existant ; la longueur des noms complets est contrôlée.
+- Quotas de domaines et de machines par compte.
 
-- **Vérification de propriété du domaine** : seuls des comptes approuvés peuvent ajouter un domaine, mais le MVP ne demande pas encore de preuve cryptographique par TXT ou par registrar. L'administrateur doit approuver uniquement des personnes de confiance et vérifier qu'elles contrôlent leur domaine. Un utilisateur approuvé malveillant pourrait réserver un domaine avant son propriétaire légitime.
-- **Inventaire DNS incomplet par nature** : le DNS public ne liste pas tous les sous-domaines ni tous les sélecteurs DKIM. L'interface copie les noms demandés et exige une confirmation de vérification. Avant la délégation, comparer la zone à l'export du fournisseur actuel et ajouter les entrées absentes. Une erreur peut interrompre la messagerie.
-- **Un seul serveur DNS et pas de DNSSEC** : un VPS indisponible arrête DNS et mail des domaines délégués. Si un DS existe déjà au registrar, l'absence de DNSSEC Synunnel peut casser la résolution.
-- **Sauvegardes et restauration** : aucune rotation ou restauration automatisée n'est fournie. Sauvegarder régulièrement les deux SQLite, `/etc/synunnel`, `/etc/wireguard` et l'état Caddy, puis tester la restauration.
-- **Réinitialisation du mot de passe et révocation globale des sessions** : pas d'interface dédiée dans le MVP. Un changement manuel de compte doit aussi nettoyer les sessions d'accès dans SQLite.
-- **Identité des associés** : l'adresse mail est l'identifiant et la validation administrative reste manuelle. Il n'y a pas encore de vérification automatique de possession de la boîte mail ni de double authentification. Ludo doit vérifier l'identité avant d'approuver chaque compte.
-- **Disponibilité du tunnel** : pas de supervision active des pairs ni de reprise automatique d'une machine hors ligne. Une adresse peut répondre 502 si son service local s'arrête.
-- **Scalabilité** : SQLite, une seule instance d'application et un rechargement de configuration par changement suffisent au MVP, pas à une plateforme multi-serveurs.
+**Isolation entre comptes**
+- Domaines, enregistrements, machines, adresses et listes d'invités sont filtrés par propriétaire ; les tests essaient explicitement des lectures et modifications croisées entre deux comptes.
 
-## Exposition des secrets et journaux
+**Adresses protégées**
+- Un visiteur est renvoyé vers le tableau de bord, puis revient avec un code à usage unique de deux minutes, stocké sous forme d'empreinte, et un cookie limité à cet hôte (12 heures).
+- L'autorisation est relue à chaque requête HTTP ; modifier la liste d'invités révoque codes et sessions de l'adresse.
+- `forward_auth` contrôle toutes les routes, publiques comprises : une route supprimée mais encore chargée dans Caddy est refusée.
+- Caddy n'émet un certificat que pour un nom autorisé par l'application (`on_demand_tls` avec `ask`).
 
-`/etc/synunnel/synunnel.env` contient `SECRET_KEY`, `ADMIN_TOKEN` et `PDNS_API_KEY`. Ne jamais le copier dans le dépôt, un ticket ou un échange public. Les commandes d'exemple ne l'impriment pas. Le journal d'audit admin conserve l'heure UTC, l'IP, la méthode, le chemin et le statut, jamais le jeton. La rotation du jeton exige la modification du fichier et un redémarrage de `synunnel` ; communiquer la nouvelle valeur à Syn par un canal sécurisé.
+**Système**
+- L'application tourne sous l'utilisateur `synunnel`, liée à `127.0.0.1:8000` ; l'API PowerDNS est liée à `127.0.0.1:8081`. PowerDNS n'est pas récursif et refuse AXFR.
+- Seul l'assistant `/usr/local/sbin/synunnel-sync` (root, appelé par une entrée sudoers limitée) écrit les configurations WireGuard et Caddy. Il revalide noms, IP, ports et clés, lit pairs et routes dans une seule transaction et sérialise ses exécutions par un verrou.
+- **Pare-feu du tunnel** : la table nftables `synunnel_wg`, chargée à chaque démarrage de `wg0`, bloque toute connexion ouverte depuis une machine du tunnel vers le VPS (SSH compris) et tout transit d'une machine à l'autre. Le VPS ouvre les connexions vers les machines, jamais l'inverse. Cette table s'applique même si UFW est inactif.
+- La clé privée d'une machine est générée à sa création, affichée une fois, jamais stockée. La clé du serveur est hors dépôt, en mode 0600.
+- Le journal d'accès de Gunicorn n'enregistre que le chemin des requêtes, sans leurs paramètres.
+- Secrets (`SECRET_KEY`, `ADMIN_TOKEN`, `PDNS_API_KEY`) dans `/etc/synunnel/synunnel.env`, root et groupe `synunnel`, mode 0640.
+
+## Limites connues de la v0.1 alpha
+
+- **Un seul serveur DNS, pas de DNSSEC.** Si le VPS tombe, les domaines délégués cessent de répondre, messagerie comprise. Un enregistrement DS laissé chez le registrar casse la résolution.
+- **Copie DNS incomplète par nature.** Le DNS public ne liste ni tous les sous-domaines ni tous les sélecteurs DKIM. Le joker vers le VPS peut capter un nom oublié, par exemple l'hôte d'un MX. Comparer la zone à l'export du fournisseur actuel avant de déléguer.
+- **Cookie d'accès transmis au service.** Pour une adresse protégée, le cookie Synunnel de cet hôte accompagne les requêtes jusqu'au service de la machine. Un service qui journalise ou renvoie les cookies l'exposerait jusqu'à son expiration.
+- **WebSocket.** Une connexion WebSocket déjà ouverte n'est pas recontrôlée à chaque message : retirer un invité ne la coupe pas.
+- **Ressources.** Pas de purge automatique du journal d'audit admin ni des tentatives expirées ; une requête anonyme sur l'API admin produit une écriture en base. Pas de quota sur le nombre d'adresses par compte.
+- **Réutilisation des IP du tunnel.** L'IP d'une machine supprimée est réattribuable immédiatement, sans période de quarantaine.
+- **Comptes.** Pas de réinitialisation de mot de passe, pas de double authentification, pas de vérification de la boîte mail : l'administrateur valide chaque compte à la main.
+- **Sauvegardes.** Aucune rotation ni restauration automatisée n'est fournie (voir le README).
+- **Docker sur le même VPS.** Docker insère ses propres règles de pare-feu et peut contourner UFW pour les ports qu'il publie. La table `synunnel_wg` reste active pour le tunnel.
+- **Dépendances.** L'installation résout les versions compatibles au moment où elle est lancée ; `uv.lock` fige les versions testées pour le développement.
+- **Échelle.** SQLite et une seule instance applicative suffisent à un usage personnel, pas à une plateforme ouverte au public.
+
+## Secrets et journaux
+
+Ne jamais copier `/etc/synunnel/synunnel.env` dans le dépôt, un ticket ou un échange. Le journal d'audit de l'API admin conserve l'heure UTC, l'IP, la méthode, le chemin et le statut, jamais le jeton. Pour changer le jeton : modifier le fichier, puis `sudo systemctl restart synunnel`.

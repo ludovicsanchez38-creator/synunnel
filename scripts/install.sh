@@ -13,11 +13,6 @@ if [[ "$(. /etc/os-release; printf '%s' "$VERSION_ID")" != "24.04" ]]; then
   exit 1
 fi
 
-export DEBIAN_FRONTEND=noninteractive
-apt-get update
-apt-get install -y pdns-server pdns-backend-sqlite3 caddy wireguard nftables python3-venv python3-pip \
-  dnsutils acl ufw curl openssl
-
 # Paramètres de l'instance. Premier lancement :
 #   sudo env PUBLIC_IPV4=203.0.113.10 DASHBOARD_HOST=tunnel.example.org \
 #     NS1_HOST=ns1.example.org NS2_HOST=ns2.example.org ACME_EMAIL=admin@example.org ./scripts/install.sh
@@ -54,6 +49,12 @@ if [[ ! "$ACME_EMAIL" =~ ^[a-zA-Z0-9._+@-]+$ ]]; then
   printf 'Adresse ACME invalide.\n' >&2
   exit 1
 fi
+
+# Paquets installés seulement une fois les paramètres vérifiés : rien ne change sur la machine avant.
+export DEBIAN_FRONTEND=noninteractive
+apt-get update
+apt-get install -y pdns-server pdns-backend-sqlite3 caddy wireguard nftables python3-venv python3-pip \
+  dnsutils acl ufw curl openssl
 
 if ! id synunnel >/dev/null 2>&1; then
   useradd --system --home /var/lib/synunnel --shell /usr/sbin/nologin synunnel
