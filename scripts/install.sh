@@ -30,7 +30,7 @@ if [[ -e /etc/synunnel/synunnel.env ]]; then
 fi
 for setting in PUBLIC_IPV4 PUBLIC_IPV6 DASHBOARD_HOST NS1_HOST NS2_HOST ACME_EMAIL SOA_RNAME REDIRECT_HOSTS \
   RESERVED_DOMAINS MAX_DOMAINS_PER_USER MAX_MACHINES_PER_USER MAX_ADDRESSES_PER_USER MAX_RECORDS_PER_DOMAIN \
-  REQUIRE_2FA SMTP_HOST SMTP_PORT SMTP_USER SMTP_FROM SMTP_PASSWORD_FILE; do
+  REQUIRE_2FA SMTP_HOST SMTP_PORT SMTP_USER SMTP_FROM SMTP_PASSWORD_FILE GUEST_CODES GUEST_CODES_WITH_2FA; do
   if [[ "${!setting:-}" == *[$'\n\r']* ]]; then
     printf '%s ne doit pas contenir de retour à la ligne.\n' "$setting" >&2
     exit 1
@@ -62,10 +62,16 @@ SMTP_PORT="${SMTP_PORT:-465}"
 SMTP_USER="${SMTP_USER:-}"
 SMTP_FROM="${SMTP_FROM:-}"
 SMTP_PASSWORD_FILE="${SMTP_PASSWORD_FILE:-}"
-if [[ "$REQUIRE_2FA" != 0 && "$REQUIRE_2FA" != 1 ]]; then
-  printf 'REQUIRE_2FA vaut 0 ou 1.\n' >&2
-  exit 1
-fi
+# Accès invité par code mail (option par adresse) : permis par défaut, coupé si REQUIRE_2FA=1 sauf
+# GUEST_CODES_WITH_2FA=1 (un invité n'a qu'un facteur, sa boîte mail).
+GUEST_CODES="${GUEST_CODES:-1}"
+GUEST_CODES_WITH_2FA="${GUEST_CODES_WITH_2FA:-0}"
+for flag in REQUIRE_2FA GUEST_CODES GUEST_CODES_WITH_2FA; do
+  if [[ "${!flag}" != 0 && "${!flag}" != 1 ]]; then
+    printf '%s vaut 0 ou 1.\n' "$flag" >&2
+    exit 1
+  fi
+done
 if [[ "$SMTP_PORT" != 465 ]]; then
   printf 'SMTP_PORT vaut 465 : seul SMTPS (TLS implicite) est pris en charge.\n' >&2
   exit 1
@@ -197,6 +203,8 @@ SMTP_PORT=$SMTP_PORT
 SMTP_USER=$SMTP_USER
 SMTP_FROM=$SMTP_FROM
 SMTP_PASSWORD_FILE=$SMTP_PASSWORD_FILE
+GUEST_CODES=$GUEST_CODES
+GUEST_CODES_WITH_2FA=$GUEST_CODES_WITH_2FA
 SYNC_COMMAND='/usr/bin/sudo -n /usr/local/sbin/synunnel-sync'
 EOF
 fi
@@ -208,7 +216,8 @@ fi
 # Une instance antérieure peut ne pas avoir toutes les clés : on complète le fichier sans rien écraser.
 for setting in PUBLIC_IPV4 PUBLIC_IPV6 DASHBOARD_HOST NS1_HOST NS2_HOST SOA_RNAME REDIRECT_HOSTS ACME_EMAIL \
   RESERVED_DOMAINS MAX_DOMAINS_PER_USER MAX_MACHINES_PER_USER MAX_ADDRESSES_PER_USER MAX_RECORDS_PER_DOMAIN \
-  REGISTRATION_MODE REQUIRE_2FA SMTP_HOST SMTP_PORT SMTP_USER SMTP_FROM SMTP_PASSWORD_FILE; do
+  REGISTRATION_MODE REQUIRE_2FA SMTP_HOST SMTP_PORT SMTP_USER SMTP_FROM SMTP_PASSWORD_FILE GUEST_CODES \
+  GUEST_CODES_WITH_2FA; do
   if ! grep -q "^${setting}=" /etc/synunnel/synunnel.env; then
     printf '%s=%s\n' "$setting" "${!setting}" >> /etc/synunnel/synunnel.env
   fi
