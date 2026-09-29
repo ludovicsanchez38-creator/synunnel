@@ -8,14 +8,18 @@ ne jamais le lancer sur une instance qui sert de vrais utilisateurs.
 """
 
 import base64
+import email
 import hashlib
 import json
 import os
 import re
 import secrets
+import socket
 import sqlite3
+import ssl
 import subprocess
 import tempfile
+import threading
 import time
 from pathlib import Path
 
@@ -34,6 +38,86 @@ VETH_HOST = "sn-e2e-host"
 VETH_PEER = "sn-e2e-peer"
 PAGE = "SYNUNNEL_E2E_WIREGUARD_OK"
 CONFIG = Path("/etc/caddy/Caddyfile")
+GUEST_EMAIL = "invite-e2e@synunnel.invalid"
+SMTP_NAME = "smtp-e2e.synunnel.test"
+SMTP_ENV = Path("/run/synunnel-e2e.env")
+SMTP_PASSWORD = Path("/run/synunnel-e2e-smtp-password")
+DROPIN = Path("/run/systemd/system/synunnel.service.d/zz-e2e.conf")
+HOSTS = Path("/etc/hosts")
+# Service de la machine : sert la page, et « /cookie » renvoie l'en-tête Cookie reçu, pour vérifier que
+# le cookie d'accès Synunnel n'y arrive jamais.
+BACKEND = """
+import sys
+from http.server import BaseHTTPRequestHandler, HTTPServer
+PAGE = sys.argv[1]
+class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == "/":
+            body = (PAGE + "\\n").encode()
+        elif self.path == "/cookie":
+            body = ("COOKIE=[" + str(self.headers.get("Cookie")) + "]").encode()
+        else:
+            self.send_error(404)
+            return
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+    def log_message(self, *args):
+        pass
+HTTPServer(("10.88.0.2", 18080), Handler).serve_forever()
+"""
+
+
+def serve_smtp(context: ssl.SSLContext, inbox: list[str], stop: threading.Event) -> None:
+    """Boîte SMTPS simulée : accepte tout, garde les messages en mémoire."""
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    server.bind(("127.0.0.1", 465))
+    server.listen(5)
+    server.settimeout(0.5)
+    while not stop.is_set():
+        try:
+            conn, _ = server.accept()
+        except TimeoutError:
+            continue
+        try:
+            with context.wrap_socket(conn, server_side=True) as tls:
+                stream = tls.makefile("rwb")
+
+                def say(line: str, stream=stream) -> None:
+                    stream.write(line.encode() + b"\r\n")
+                    stream.flush()
+
+                say("220 e2e ESMTP")
+                lines: list[str] | None = None
+                while raw := stream.readline():
+                    line = raw.decode(errors="replace").rstrip("\r\n")
+                    if lines is not None:
+                        if line == ".":
+                            inbox.append("\n".join(lines))
+                            lines = None
+                            say("250 OK")
+                        else:
+                            lines.append(line[1:] if line.startswith("..") else line)
+                        continue
+                    verb = line[:4].upper()
+                    if verb == "EHLO":
+                        say("250-e2e")
+                        say("250 AUTH PLAIN LOGIN")
+                    elif verb == "AUTH":
+                        say("235 OK")
+                    elif verb == "DATA":
+                        lines = []
+                        say("354 go")
+                    elif verb == "QUIT":
+                        say("221 bye")
+                        break
+                    else:
+                        say("250 OK")
+        except (OSError, ssl.SSLError):
+            continue
+    server.close()
 
 
 def run(*args: str, check: bool = True, **kwargs) -> subprocess.CompletedProcess:
@@ -84,6 +168,10 @@ def main() -> None:
     private_file.write_text(private + "\n")
     private_file.chmod(0o600)
     http_server = None
+    inbox: list[str] = []
+    smtp_stop = threading.Event()
+    smtp_dirs: list[Path] = []
+    hosts_original: list[str] = []
     zone_created = False
     netns_created = False
     caddy_changed = False
@@ -152,8 +240,8 @@ def main() -> None:
         run("ip", "netns", "exec", NS, "ip", "route", "add", "10.88.0.1/32", "dev", "wg-e2e")
         http_server = subprocess.Popen(
             ["ip", "netns", "exec", NS, "setpriv", "--reuid=nobody", "--regid=nogroup", "--clear-groups",
-             "python3", "-m", "http.server", "18080", "--bind", "10.88.0.2", "--directory", str(web_dir)],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+             "python3", "-c", BACKEND, PAGE],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, cwd=str(web_dir),
         )
         # Un paquet sortant apprend à wg0 l'endpoint du pair local.
         run("ip", "netns", "exec", NS, "ping", "-c", "1", "-W", "2", "10.88.0.1", check=False)
@@ -320,6 +408,88 @@ def main() -> None:
         if status != 302 or not location.endswith("/dashboard"):
             raise AssertionError(f"Le ticket de récupération n'a pas retiré le second facteur ({status} {location}).")
         print("Ticket de récupération de l'administrateur par HTTPS : OK")
+
+        # Accès invité par code : boîte SMTPS simulée, code lu dans le mail, accès par HTTPS, sortie.
+        smtp_dir = Path(tempfile.mkdtemp(prefix="synunnel-e2e-smtp-", dir="/run"))
+        smtp_dir.chmod(0o755)
+        smtp_dirs.append(smtp_dir)
+        ext = smtp_dir / "ext.cnf"
+        ext.write_text(f"subjectAltName=DNS:{SMTP_NAME}\n")
+        run("openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", str(smtp_dir / "ca.key"),
+            "-out", str(smtp_dir / "ca.crt"), "-days", "1", "-subj", "/CN=Synunnel E2E CA")
+        run("openssl", "req", "-newkey", "rsa:2048", "-nodes", "-keyout", str(smtp_dir / "smtp.key"),
+            "-out", str(smtp_dir / "smtp.csr"), "-subj", f"/CN={SMTP_NAME}")
+        run("openssl", "x509", "-req", "-in", str(smtp_dir / "smtp.csr"), "-CA", str(smtp_dir / "ca.crt"),
+            "-CAkey", str(smtp_dir / "ca.key"), "-CAcreateserial", "-out", str(smtp_dir / "smtp.crt"),
+            "-days", "1", "-extfile", str(ext))
+        (smtp_dir / "ca.crt").chmod(0o644)
+        context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
+        context.load_cert_chain(str(smtp_dir / "smtp.crt"), str(smtp_dir / "smtp.key"))
+        threading.Thread(target=serve_smtp, args=(context, inbox, smtp_stop), daemon=True).start()
+        hosts_original.append(HOSTS.read_text())
+        HOSTS.write_text(hosts_original[0] + f"127.0.0.1 {SMTP_NAME}\n")
+        SMTP_PASSWORD.write_text("mot-de-passe-de-la-boite-simulee\n")
+        run("chown", "root:synunnel", str(SMTP_PASSWORD))
+        SMTP_PASSWORD.chmod(0o640)
+        SMTP_ENV.write_text(f"SMTP_HOST={SMTP_NAME}\nSMTP_PORT=465\nSMTP_USER=noreply@synunnel.test\n"
+                            f"SMTP_FROM=noreply@synunnel.test\nSMTP_PASSWORD_FILE={SMTP_PASSWORD}\n"
+                            f"SSL_CERT_FILE={smtp_dir / 'ca.crt'}\n")
+        DROPIN.parent.mkdir(parents=True, exist_ok=True)
+        DROPIN.write_text(f"[Service]\nEnvironmentFile={SMTP_ENV}\n")
+        run("systemctl", "daemon-reload")
+        run("systemctl", "restart", "synunnel")
+        for _ in range(30):
+            if web("/login")[0] == 200:
+                break
+            time.sleep(0.5)
+        with db:
+            address_id = db.execute("SELECT id FROM addresses WHERE hostname=?", (PROTECTED,)).fetchone()[0]
+            db.execute("UPDATE addresses SET shared=1, guest_codes=1 WHERE id=?", (address_id,))
+            db.execute("INSERT INTO address_grants(address_id,email) VALUES(?,?)", (address_id, GUEST_EMAIL))
+        jar.unlink(missing_ok=True)
+        target = f"https://{PROTECTED}/"
+        _, _, html = web(f"/access/code?next={target}")
+        status, location, _ = web("/access/code", {"csrf_token": csrf_of(html), "email": GUEST_EMAIL, "next": target})
+        if status != 302 or not location.endswith("/access/verify"):
+            raise AssertionError(f"Demande de code invité refusée ({status} {location}).")
+        for _ in range(40):
+            if inbox:
+                break
+            time.sleep(0.5)
+        if not inbox:
+            raise AssertionError("Aucun mail de code n'est arrivé dans la boîte simulée.")
+        message = email.message_from_string(inbox[-1])
+        body = message.get_payload(decode=True).decode("utf-8")
+        code = re.search(r"\b(\d{6})\b", body).group(1)
+        if message["To"] != GUEST_EMAIL or "https://" in body:
+            raise AssertionError("Le mail de code n'a pas la forme attendue.")
+        _, _, html = web("/access/verify")
+        status, _, html = web("/access/verify", {"csrf_token": csrf_of(html), "code": code})
+        relay = re.search(r'href="([^"]+)">Continuer', html)
+        if status != 200 or not relay:
+            raise AssertionError(f"Code invité refusé (statut {status}).")
+        host_args = [*base, "--resolve", f"{PROTECTED}:443:{values['PUBLIC_IPV4']}", "-c", str(jar), "-b", str(jar)]
+        back = run(*host_args, "--output", "/dev/null", "--write-out", "%{http_code} %{redirect_url}",
+                   relay.group(1).replace("&amp;", "&"), check=False).stdout
+        if not back.startswith("302"):
+            raise AssertionError(f"Le callback de l'invité n'ouvre pas l'accès ({back}).")
+        if PAGE not in run(*host_args, f"https://{PROTECTED}/").stdout:
+            raise AssertionError("L'invité n'atteint pas le service derrière le tunnel.")
+        access = next(line.split("\t")[-1] for line in jar.read_text().splitlines()
+                      if line.split("\t")[-2:-1] == ["__Host-synunnel-access"])
+        seen = run(*base, "--resolve", f"{PROTECTED}:443:{values['PUBLIC_IPV4']}", "--header",
+                   f"Cookie: a=1; __Host-synunnel-access={access}; b=2", f"https://{PROTECTED}/cookie").stdout
+        if seen != "COOKIE=[a=1; b=2]":
+            raise AssertionError(f"Le service a reçu le cookie d'accès Synunnel : {seen!r}")
+        print("Accès invité par code mail (boîte SMTPS simulée), cookie retiré avant le service : OK")
+        page = run(*host_args, f"https://{PROTECTED}/__synunnel/logout").stdout
+        run(*host_args, "--data-urlencode", f"csrf_token={csrf_of(page)}", f"https://{PROTECTED}/__synunnel/logout")
+        after = run(*base, "--resolve", f"{PROTECTED}:443:{values['PUBLIC_IPV4']}", "--output", "/dev/null",
+                    "--write-out", "%{http_code}", "--header", f"Cookie: __Host-synunnel-access={access}",
+                    f"https://{PROTECTED}/", check=False).stdout
+        if after != "302":
+            raise AssertionError(f"Le cookie de l'invité reste valable après sa sortie ({after}).")
+        print("Sortie de l'invité par /__synunnel/logout, cookie rejoué refusé : OK")
         completed = True
     finally:
         errors: list[str] = []
@@ -352,6 +522,22 @@ def main() -> None:
             with db:
                 db.execute("DELETE FROM users WHERE email=?", (EMAIL,))
 
+        def restore_smtp() -> None:
+            smtp_stop.set()
+            DROPIN.unlink(missing_ok=True)
+            SMTP_ENV.unlink(missing_ok=True)
+            SMTP_PASSWORD.unlink(missing_ok=True)
+            if hosts_original:
+                HOSTS.write_text(hosts_original[0])
+            run("systemctl", "daemon-reload")
+            run("systemctl", "restart", "synunnel")
+            for directory in smtp_dirs:
+                for item in directory.iterdir():
+                    item.unlink()
+                directory.rmdir()
+
+        if smtp_dirs or DROPIN.exists():
+            attempt("boîte SMTP simulée", restore_smtp)
         if caddy_changed:
             attempt("Caddyfile", restore_caddy)
         if http_server:
