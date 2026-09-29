@@ -6,6 +6,7 @@ Installé root:root, appelé uniquement par sudoers depuis le service synunnel.
 
 import base64
 import binascii
+import fcntl
 import ipaddress
 import os
 import re
@@ -19,6 +20,8 @@ WG_KEY_PATH = Path("/etc/wireguard/synunnel-server.key")
 WG_CONFIG_PATH = Path("/etc/wireguard/wg0.conf")
 CADDY_ROUTES_PATH = Path("/etc/caddy/synunnel-routes.caddy")
 CADDYFILE_PATH = Path("/etc/caddy/Caddyfile")
+LOCK_PATH = Path("/run/synunnel-sync.lock")
+FIREWALL_PATH = Path("/etc/synunnel/wg0-firewall.nft")
 HOST_RE = re.compile(r"^[a-z0-9-]+(?:\.[a-z0-9-]+)+$")
 
 
@@ -49,7 +52,9 @@ def wireguard_config(db: sqlite3.Connection) -> str:
         raise ValueError("Clé WireGuard du serveur invalide")
     lines = [
         "[Interface]", "Address = 10.88.0.1/24", "ListenPort = 51820",
-        f"PrivateKey = {private}", "",
+        f"PrivateKey = {private}",
+        f"PostUp = /usr/sbin/nft -f {FIREWALL_PATH}",
+        "PostDown = /usr/sbin/nft delete table inet synunnel_wg", "",
     ]
     for row in db.execute("SELECT ip,public_key FROM machines ORDER BY ip"):
         ip = ipaddress.ip_address(row["ip"])
@@ -97,24 +102,41 @@ def caddy_routes(db: sqlite3.Connection) -> str:
     return "\n".join(lines) + "\n"
 
 
+def wireguard_active() -> bool:
+    return subprocess.run(
+        ["/usr/bin/systemctl", "is-active", "--quiet", "wg-quick@wg0"],
+        check=False, capture_output=True, timeout=10,
+    ).returncode == 0
+
+
+def read_snapshot() -> tuple[str, str]:
+    """Lit pairs et routes dans une seule transaction : les deux reflètent le même état."""
+    db = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True, isolation_level=None)
+    db.row_factory = sqlite3.Row
+    try:
+        db.execute("BEGIN")
+        return wireguard_config(db), caddy_routes(db)
+    finally:
+        db.close()
+
+
 def main() -> None:
     if os.geteuid() != 0:
         raise SystemExit("Exécution root requise")
-    db = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
-    db.row_factory = sqlite3.Row
-    new_wg = wireguard_config(db)
-    new_routes = caddy_routes(db)
-    db.close()
+    # Deux workers peuvent déclencher une synchronisation au même moment : on les sérialise.
+    with open(LOCK_PATH, "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        apply(*read_snapshot())
+
+
+def apply(new_wg: str, new_routes: str) -> None:
 
     old_wg = WG_CONFIG_PATH.read_text() if WG_CONFIG_PATH.exists() else ""
     old_routes = CADDY_ROUTES_PATH.read_text() if CADDY_ROUTES_PATH.exists() else ""
     if new_wg != old_wg:
         atomic_write(WG_CONFIG_PATH, new_wg, 0o600)
         try:
-            if subprocess.run(
-                ["/usr/bin/systemctl", "is-active", "--quiet", "wg-quick@wg0"],
-                check=False, capture_output=True, timeout=10,
-            ).returncode == 0:
+            if wireguard_active():
                 stripped = run("/usr/bin/wg-quick", "strip", str(WG_CONFIG_PATH)).stdout
                 with tempfile.NamedTemporaryFile(mode="wb", dir="/run", prefix="synunnel-wg-", delete=False) as tmp:
                     tmp.write(stripped)
@@ -128,6 +150,9 @@ def main() -> None:
         except Exception:
             atomic_write(WG_CONFIG_PATH, old_wg, 0o600)
             raise
+    elif not wireguard_active():
+        # Configuration inchangée mais tunnel arrêté (redémarrage, arrêt manuel) : on le relance.
+        run("/usr/bin/systemctl", "start", "wg-quick@wg0")
     if new_routes != old_routes:
         atomic_write(CADDY_ROUTES_PATH, new_routes, 0o644)
         try:

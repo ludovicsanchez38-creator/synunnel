@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
-"""Essai intégré éphémère sur un VPS Synunnel sans domaine délégué.
+"""Essai intégré éphémère, à lancer UNIQUEMENT sur une machine jetable.
 
 Crée un pair WireGuard dans un espace réseau local et une zone .test,
 sert une page par Caddy avec sa CA interne, puis remet la configuration.
+Pendant l'essai, le Caddyfile, la base, PowerDNS et WireGuard réels sont modifiés :
+ne jamais le lancer sur une instance qui sert de vrais utilisateurs.
 """
 
 import os
+import secrets
 import sqlite3
 import subprocess
 import tempfile
@@ -44,6 +47,8 @@ def env_file() -> dict[str, str]:
 def main() -> None:
     if os.geteuid() != 0:
         raise SystemExit("L'essai doit être lancé avec sudo.")
+    if os.environ.get("SYNUNNEL_E2E_DISPOSABLE") != "1":
+        raise SystemExit("Essai réservé à une machine jetable : relance avec SYNUNNEL_E2E_DISPOSABLE=1.")
     values = env_file()
     db = sqlite3.connect(values["DATABASE"], timeout=10)
     db.row_factory = sqlite3.Row
@@ -56,16 +61,21 @@ def main() -> None:
         raise SystemExit("L'espace réseau de test existe déjà ; aucune donnée n'a été touchée.")
 
     pdns = PowerDNS(values["PDNS_API_URL"], values["PDNS_API_KEY"], (
-        f"{values.get('NS1_HOST', 'ns1.synunnel.fr')}.",
-        f"{values.get('NS2_HOST', 'ns2.synunnel.fr')}.",
+        f"{values['NS1_HOST']}.", f"{values['NS2_HOST']}.",
     ))
     original_caddy = CONFIG.read_text()
     private = run("wg", "genkey").stdout.strip()
     public = run("wg", "pubkey", input=private + "\n").stdout.strip()
-    temp_dir = Path(tempfile.mkdtemp(prefix="synunnel-e2e-", dir="/run"))
-    page_file = temp_dir / "index.html"
+    password = secrets.token_urlsafe(24)
+    # La page servie et la clé privée vivent dans deux répertoires distincts :
+    # le serveur HTTP de l'essai ne voit que le premier.
+    web_dir = Path(tempfile.mkdtemp(prefix="synunnel-e2e-web-", dir="/run"))
+    web_dir.chmod(0o755)
+    page_file = web_dir / "index.html"
     page_file.write_text(PAGE + "\n")
-    private_file = temp_dir / "client.key"
+    page_file.chmod(0o644)
+    key_dir = Path(tempfile.mkdtemp(prefix="synunnel-e2e-key-", dir="/run"))
+    private_file = key_dir / "client.key"
     private_file.write_text(private + "\n")
     private_file.chmod(0o600)
     http_server = None
@@ -78,7 +88,7 @@ def main() -> None:
         with db:
             user_id = db.execute(
                 "INSERT INTO users(email,password_hash,status,created_at) VALUES(?,?,'approved',?)",
-                (EMAIL, PasswordHasher().hash(private), "2026-09-27T00:00:00Z"),
+                (EMAIL, PasswordHasher().hash(password), "2026-09-27T00:00:00Z"),
             ).lastrowid
             domain_id = db.execute(
                 "INSERT INTO domains(user_id,name,created_at) VALUES(?,?,?)",
@@ -128,7 +138,8 @@ def main() -> None:
         run("ip", "netns", "exec", NS, "ip", "link", "set", "wg-e2e", "up")
         run("ip", "netns", "exec", NS, "ip", "route", "add", "10.88.0.1/32", "dev", "wg-e2e")
         http_server = subprocess.Popen(
-            ["ip", "netns", "exec", NS, "python3", "-m", "http.server", "18080", "--bind", "10.88.0.2", "--directory", str(temp_dir)],
+            ["ip", "netns", "exec", NS, "setpriv", "--reuid=nobody", "--regid=nogroup", "--clear-groups",
+             "python3", "-m", "http.server", "18080", "--bind", "10.88.0.2", "--directory", str(web_dir)],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
         # Un paquet sortant apprend à wg0 l'endpoint du pair local.
@@ -162,6 +173,18 @@ def main() -> None:
         if not any(line.split()[0] == public and int(line.split()[1]) > 0 for line in handshakes):
             raise AssertionError("La poignée de main WireGuard manque.")
         print("Page HTTPS via Caddy et service derrière le pair WireGuard : OK")
+        leaked = run(*command, "--output", "/dev/null", "--write-out", "%{http_code}",
+                     f"https://{HOST}/client.key", check=False).stdout.strip()
+        if leaked == "200":
+            raise AssertionError("La clé privée de l'essai est accessible par HTTP.")
+        print("Clé privée de l'essai hors de portée du serveur HTTP : OK")
+
+        # Le pair ne doit joindre aucun service du VPS par le tunnel (Caddy écoute sur toutes les interfaces).
+        inbound = run("ip", "netns", "exec", NS, "curl", "--noproxy", "*", "--silent", "--max-time", "4",
+                      "http://10.88.0.1/", check=False)
+        if inbound.returncode == 0:
+            raise AssertionError("Le pair a ouvert une connexion vers le VPS par le tunnel.")
+        print("Connexion du pair vers le VPS bloquée par le pare-feu du tunnel : OK")
 
         dashboard_host = values["DASHBOARD_HOST"]
         dashboard = run(
@@ -172,7 +195,7 @@ def main() -> None:
         if "Synunnel" not in dashboard:
             raise AssertionError("Le tableau de bord configuré ne répond pas.")
         print(f"Tableau de bord HTTPS sur {dashboard_host} via --resolve : OK")
-        for alias in values["REDIRECT_HOSTS"].split(","):
+        for alias in [host for host in values.get("REDIRECT_HOSTS", "").split(",") if host]:
             redirected = run(
                 "curl", "--noproxy", "*", "--silent", "--show-error", "--insecure", "--max-time", "8",
                 "--resolve", f"{alias}:443:{values['PUBLIC_IPV4']}",
@@ -180,7 +203,7 @@ def main() -> None:
             ).stdout.lower()
             if " 308 " not in redirected or f"location: https://{dashboard_host}/essai" not in redirected:
                 raise AssertionError(f"Redirection absente pour {alias}.")
-        print("Redirections synunnel.com et www en HTTPS via --resolve : OK")
+        print("Redirections des noms secondaires en HTTPS via --resolve : OK")
 
         guarded = run(
             "curl", "--noproxy", "*", "--silent", "--show-error", "--insecure", "--max-time", "8",
@@ -200,29 +223,48 @@ def main() -> None:
             raise AssertionError("Le nom d'hôte non déclaré a été accepté.")
         print("Nom d'hôte non déclaré refusé au TLS : OK")
     finally:
-        if caddy_changed:
+        errors: list[str] = []
+
+        def attempt(label: str, action) -> None:
+            try:
+                action()
+            except Exception as exc:  # noqa: BLE001 - chaque étape de remise en état doit être tentée
+                errors.append(f"{label} : {exc}")
+
+        def restore_caddy() -> None:
             CONFIG.write_text(original_caddy)
             run("systemctl", "reload", "caddy")
-        if http_server:
+
+        def stop_http() -> None:
             http_server.terminate()
             try:
                 http_server.wait(timeout=3)
             except subprocess.TimeoutExpired:
                 http_server.kill()
                 http_server.wait(timeout=3)
-        if netns_created:
-            run("ip", "netns", "delete", NS, check=False)
-            run("ip", "link", "delete", VETH_HOST, check=False)
-        with db:
-            db.execute("DELETE FROM users WHERE email=?", (EMAIL,))
-        if zone_created:
-            pdns.delete_zone(DOMAIN)
-        run("/usr/local/sbin/synunnel-sync")
-        for path in (private_file, page_file):
-            path.unlink(missing_ok=True)
-        temp_dir.rmdir()
-        db.close()
 
+        def drop_user() -> None:
+            with db:
+                db.execute("DELETE FROM users WHERE email=?", (EMAIL,))
+
+        if caddy_changed:
+            attempt("Caddyfile", restore_caddy)
+        if http_server:
+            attempt("serveur HTTP", stop_http)
+        if netns_created:
+            attempt("espace réseau", lambda: run("ip", "netns", "delete", NS, check=False))
+            attempt("interface veth", lambda: run("ip", "link", "delete", VETH_HOST, check=False))
+        attempt("compte de test", drop_user)
+        if zone_created:
+            attempt("zone PowerDNS", lambda: pdns.delete_zone(DOMAIN))
+        attempt("synchronisation", lambda: run("/usr/local/sbin/synunnel-sync"))
+        for path in (private_file, page_file):
+            attempt(str(path), lambda path=path: path.unlink(missing_ok=True))
+        for directory in (key_dir, web_dir):
+            attempt(str(directory), directory.rmdir)
+        db.close()
+        if errors:
+            print("Remise en état incomplète, à vérifier à la main :\n- " + "\n- ".join(errors))
 
 if __name__ == "__main__":
     main()
