@@ -2,11 +2,13 @@
 {% block title %}Supprimer {{ domain.name }}{% endblock %}
 {% block content %}
 <section class="page-head"><a class="back" href="{{ url_for('domain_detail', domain_id=domain.id) }}">← {{ domain.name }}</a><span class="eyebrow">Zone DNS</span><h1>Supprimer {{ domain.name }}</h1><p>La zone est retirée du DNS de l'instance. Avant, remets les serveurs de noms de ton hébergeur chez ton registrar : tant que le domaine est délégué ici, la suppression est refusée, car elle couperait le site et la messagerie du domaine.</p></section>
-<section class="card wide"><h2>Confirmer la suppression</h2>
+{% if owner_deletion %}<section class="card wide"><h2>Confirmer la suppression</h2>
   <form method="post" action="{{ url_for('delete_domain', domain_id=domain.id) }}">
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
     <label>Retape le nom du domaine pour confirmer<input name="confirm_name" autocomplete="off" spellcheck="false" required placeholder="{{ domain.name }}"></label>
     <button class="button" type="submit">Supprimer définitivement {{ domain.name }}</button>
   </form>
-</section>
+</section>{% else %}<section class="card wide"><h2>Suppression par l'administrateur</h2>
+  <p>Sur cette instance, la suppression d'un domaine passe par l'administrateur{% if admin_contact %} : écris à <a href="mailto:{{ admin_contact }}">{{ admin_contact }}</a>{% endif %}. Remets d'abord les serveurs de noms de ton hébergeur chez ton registrar.</p>
+</section>{% endif %}
 {% endblock %}

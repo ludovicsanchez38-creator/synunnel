@@ -564,6 +564,10 @@ def delete_domain(app: Flask, user_id: int | None, domain_id: int, guard: Guard 
     """Supprime un domaine et sa zone. Le propriétaire doit d'abord retirer ses adresses et rendre la
     délégation à son hébergeur ; l'administrateur (user_id None, force) passe outre, par exemple pour
     rendre un domaine à son vrai titulaire."""
+    if user_id is not None and not app.config.get("OWNER_DOMAIN_DELETION", True):
+        contact = app.config.get("ADMIN_CONTACT")
+        raise ActionError(403, "admin_only", "Sur cette instance, la suppression d'un domaine passe par "
+                          "l'administrateur" + (f" ({contact})." if contact else "."))
     designated = None
     if not force:
         # Relevé de délégation propre à cette suppression, hors verrou (requêtes DNS) : tant que la zone

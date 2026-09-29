@@ -176,6 +176,8 @@ def create_app(config_override: dict | None = None) -> Flask:
         # 2FA est exigée, sauf choix explicite GUEST_CODES_WITH_2FA=1.
         GUEST_CODES=os.getenv("GUEST_CODES", "1") == "1",
         GUEST_CODES_WITH_2FA=os.getenv("GUEST_CODES_WITH_2FA", "0") == "1",
+        # Suppression d'un domaine par son titulaire (1, par défaut) ou réservée à l'administrateur (0).
+        OWNER_DOMAIN_DELETION=os.getenv("OWNER_DOMAIN_DELETION", "1") != "0",
         SMTP_HOST=os.getenv("SMTP_HOST", ""),
         SMTP_PORT=os.getenv("SMTP_PORT", "465"),
         SMTP_USER=os.getenv("SMTP_USER", ""),
@@ -490,7 +492,8 @@ def create_app(config_override: dict | None = None) -> Flask:
         except actions.ActionError:
             abort(404)
         if request.method != "POST":
-            return render_template("domain_delete.html", domain=domain)
+            return render_template("domain_delete.html", domain=domain,
+                                   owner_deletion=app.config["OWNER_DOMAIN_DELETION"])
         # Confirmation sans JavaScript : le nom du domaine, retapé.
         if request.form.get("confirm_name", "").strip().lower().rstrip(".") != domain["name"]:
             flash("Le nom retapé ne correspond pas au domaine : rien n'a été supprimé.", "error")

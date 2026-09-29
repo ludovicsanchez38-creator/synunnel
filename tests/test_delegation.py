@@ -343,3 +343,26 @@ def test_pending_removals_cannot_starve_the_active_zones(app, monkeypatch):
                           refresh_delegation=lambda app_, domain: None)
     assert projected == ["active.example"]
     assert len(checks) <= glob["REMOVAL_BUDGET_SECONDS"] // 10 + 1
+
+
+def test_owner_deletion_can_be_reserved_to_the_administrator_without_touching_the_code(app):
+    """Option prête pour l'alpha, sans bascule par défaut : OWNER_DOMAIN_DELETION=0 réserve la suppression
+    d'un domaine à l'administrateur (tableau de bord et API) ; par défaut, le titulaire garde la main."""
+    from test_api import bearer, create_token
+    from test_app import csrf
+
+    assert app.config["OWNER_DOMAIN_DELETION"] is True
+    app.config["OWNER_DOMAIN_DELETION"] = False
+    client = app.test_client()
+    register_approve_login(app, client, "reserve@example.org")
+    domain_id = add_domain(client, "reserve.example")
+    token = create_token(client)
+    refused = client.delete(f"/api/v1/domains/{domain_id}", headers=bearer(token))
+    assert refused.status_code == 403 and refused.json["error"]["code"] == "admin_only"
+    page = client.get(f"/domains/{domain_id}/delete").data.decode()
+    assert 'name="confirm_name"' not in page and "administrateur" in page
+    client.post(f"/domains/{domain_id}/delete", data={"csrf_token": csrf(client), "confirm_name": "reserve.example"})
+    assert _domain_exists(app, domain_id)
+    forced = client.post("/admin/api/domains/delete", json={"name": "reserve.example"},
+                         headers={"Authorization": "Bearer test-admin-token-only"})
+    assert forced.status_code == 200 and not _domain_exists(app, domain_id)

@@ -86,6 +86,8 @@ Les comptes s'ouvrent par invitation (`REGISTRATION_MODE=invitation`, par défau
 
 **Ouvrir une adresse à des invités sans compte.** Sur la page Accès d'une adresse protégée, la case « Accès par code mail » permet aux personnes de la liste d'entrer avec un code à 6 chiffres reçu par mail, sans créer de compte (instance avec boîte d'envoi seulement). Réglages d'instance : `GUEST_CODES=0` le coupe partout ; avec `REQUIRE_2FA=1`, il faut aussi `GUEST_CODES_WITH_2FA=1`.
 
+**Supprimer un domaine.** Par défaut, le titulaire supprime lui-même un domaine sans adresse, une fois la délégation retirée chez son registrar. `OWNER_DOMAIN_DELETION=0` réserve la suppression à l'administrateur (tableau de bord et API répondent `admin_only`), qui passe alors par l'API d'administration.
+
 **Sécuriser son compte.** Page **Sécurité** : double authentification par application de codes (Aegis, 2FAS, Google Authenticator, un gestionnaire de mots de passe…), dix codes de secours, changement de mot de passe et vérification de l'adresse mail, qui permet ensuite de réinitialiser un mot de passe oublié. Activer la double authentification ou changer de mot de passe coupe les autres sessions et révoque les jetons d'API.
 
 ## API pour agents
