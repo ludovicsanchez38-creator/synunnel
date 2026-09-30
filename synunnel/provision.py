@@ -63,8 +63,10 @@ def provision_site(
         raise ValueError("Copie DNS vide : zone non créée.")
 
     # Tout est vérifié et écrit sous un seul verrou d'écriture, sans appel réseau ; PowerDNS et le
-    # tunnel sont mis à jour ensuite et le rapprochement automatique termine en cas d'échec.
-    with db:
+    # tunnel sont mis à jour ensuite et le rapprochement automatique termine en cas d'échec. Le verrou de
+    # zone, pris avant, attend qu'un retrait en cours du même nom ait fini d'effacer l'ancienne zone.
+    from . import actions  # import tardif : actions dépend de ce module pour les clés
+    with actions.name_lock(app, domain_name), db:
         db.execute("BEGIN IMMEDIATE")
         if existing_domain is None:
             # Contrôle refait sous verrou : une vérification web concurrente a pu créer
@@ -117,7 +119,6 @@ def provision_site(
             elif (address["domain_id"] != domain_id or address["machine_id"] != machine_id
                   or address["port"] != port or not address["protected"] or not address["shared"]):
                 raise ValueError(f"Adresse existante avec une configuration différente : {hostname}.")
-    from . import actions  # import tardif : actions dépend de ce module pour les clés
     if not actions.project_zone(app, {"id": domain_id, "name": domain_name}):
         print("PowerDNS pas encore à jour : le rapprochement automatique terminera.")
     if app.config.get("SYNC_COMMAND"):

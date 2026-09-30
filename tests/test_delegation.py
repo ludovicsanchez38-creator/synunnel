@@ -469,3 +469,60 @@ def test_older_removals_receive_a_generation_so_the_check_is_never_skipped(app):
         init_db()
         row = db.execute("SELECT generation FROM zone_removals WHERE name='ancien.example'").fetchone()
         assert row[0]
+
+
+def test_a_new_incarnation_cannot_be_committed_while_an_older_removal_is_erasing_the_zone(app, monkeypatch):
+    """Passe ciblée sur 1368dec, constat 25 : entre la relecture d'un retrait et l'effacement PowerDNS, une
+    requête pouvait recréer le même nom (puis le supprimer de nouveau) ; l'effacement ancien partait quand
+    même. Les transactions qui changent l'incarnation d'un nom prennent désormais le verrou de zone."""
+    import threading
+
+    from test_app import PROOFS, claim_domain, csrf
+
+    from synunnel import actions
+    from synunnel.db import get_db
+
+    client = app.test_client()
+    register_approve_login(app, client, "incarnation@example.org")
+    claim_id, proof = claim_domain(client, "incarnation.example")
+    PROOFS.setdefault("incarnation.example", set()).add(proof)
+    token = csrf(client)
+    committed = threading.Event()
+    during_delete = {}
+
+    class FakePowerDNS:
+        def delete_zone(self, name):
+            def verify():
+                client.post(f"/claims/{claim_id}/verify", data={"csrf_token": token})
+                committed.set()
+            import sqlite3
+            import time
+
+            worker = threading.Thread(target=verify)
+            worker.start()
+            time.sleep(0.6)
+            # La vérification concurrente ne doit pas pouvoir écrire le domaine pendant l'effacement.
+            probe = sqlite3.connect(app.config["DATABASE"], timeout=1)
+            during_delete["committed"] = probe.execute(
+                "SELECT 1 FROM domains WHERE name='incarnation.example'").fetchone() is not None
+            probe.close()
+            during_delete["worker"] = worker
+
+        def ensure_zone(self, name):
+            pass
+
+        def sync_zone(self, *args, **kwargs):
+            pass
+
+    app.config["PDNS_ENABLED"] = True
+    monkeypatch.setattr("synunnel.actions._pdns", lambda app_: FakePowerDNS())
+    with app.app_context():
+        db = get_db()
+        with db:
+            db.execute("INSERT INTO zone_removals(name,at,forced,generation) "
+                       "VALUES('incarnation.example','x',1,'g1')")
+        assert actions.remove_zone(app, "incarnation.example", generation="g1") is True
+    during_delete["worker"].join(10)
+    assert during_delete["committed"] is False and committed.is_set()
+    with app.app_context():
+        assert get_db().execute("SELECT 1 FROM domains WHERE name='incarnation.example'").fetchone() is not None

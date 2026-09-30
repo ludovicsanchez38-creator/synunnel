@@ -22,6 +22,7 @@ import subprocess
 import time
 import unicodedata
 from collections.abc import Callable
+from contextlib import contextmanager, nullcontext
 
 import requests
 from flask import Flask, current_app
@@ -175,6 +176,18 @@ def zone_lock(app: Flask, name: str):
     handle = open(folder / f"zone-{name}.lock", "w")  # noqa: SIM115 - libéré par l'appelant
     fcntl.flock(handle, fcntl.LOCK_EX)
     return handle
+
+
+@contextmanager
+def name_lock(app: Flask, name: str):
+    """Verrou de zone autour d'une transaction qui change l'incarnation d'un nom (création, suppression) :
+    toujours pris avant BEGIN IMMEDIATE, comme dans remove_zone, jamais pendant un appel qui le reprend."""
+    lock = zone_lock(app, name) if app.config["PDNS_ENABLED"] else None
+    try:
+        yield
+    finally:
+        if lock is not None:
+            lock.close()
 
 
 def project_zone(app: Flask, domain) -> bool:
@@ -431,7 +444,7 @@ def verify_claim(app: Flask, user_id: int, claim_id: int, guard: Guard = None, a
             raise _invalid(f"Enregistrement public refusé ({rel} {kind}) : {exc}") from exc
     snapshot = checked
     try:
-        with db:
+        with name_lock(app, domain), db:
             _begin(db, guard)
             if not db.execute(
                 "SELECT 1 FROM domain_claims WHERE id=? AND user_id=? AND name=? AND token=? AND domain_id IS NULL",
@@ -598,7 +611,8 @@ def delete_domain(app: Flask, user_id: int | None, domain_id: int, guard: Guard 
             designated = still_designated(active, seen, (f"{app.config['NS1_HOST']}.",
                                                          f"{app.config['NS2_HOST']}."))
     db = get_db()
-    with db:
+    name = db.execute("SELECT name FROM domains WHERE id=?", (domain_id,)).fetchone()
+    with name_lock(app, name["name"]) if name else nullcontext(), db:
         _begin(db, guard)
         if user_id is None:
             domain = db.execute("SELECT * FROM domains WHERE id=?", (domain_id,)).fetchone()
