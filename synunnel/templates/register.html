@@ -2,9 +2,9 @@
 {% block title %}Inscription{% endblock %}
 {% block content %}
 <section class="auth-layout">
-  <div class="intro"><span class="eyebrow">Bienvenue</span><h1>Publiez vos services sur votre domaine.</h1>
+  <div class="intro"><span class="eyebrow">Bienvenue</span><h1>Publie tes services sur ton domaine.</h1>
     {% if invitation_mode %}<p>Cette instance fonctionne sur invitation. L'administrateur t'a remis un code lié à ton adresse mail : il ouvre ton compte immédiatement.</p><p class="muted">Pas de code ? Demande-le à l'administrateur de l'instance.</p>
-    {% else %}<p>Créez un compte pour préparer votre espace. L'administrateur de cette instance le valide avant que vous puissiez ajouter un domaine.</p><p class="muted">Synunnel n'envoie aucun mail automatique : l'administrateur vous prévient lui-même.</p>{% endif %}</div>
+    {% else %}<p>Crée un compte pour préparer ton espace. L'administrateur de cette instance le valide avant que tu puisses ajouter un domaine.</p><p class="muted">Synunnel n'envoie aucun mail automatique : l'administrateur te prévient lui-même.</p>{% endif %}</div>
   <div class="card auth-card"><h2>{{ "Créer mon compte" if invitation_mode else "Demander un accès" }}</h2>
     <form method="post" action="{{ url_for('register') }}">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">

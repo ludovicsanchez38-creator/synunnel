@@ -2,15 +2,15 @@
 {% block title %}Connexion{% endblock %}
 {% block content %}
 <section class="auth-layout">
-  <div class="intro"><span class="eyebrow">Accès privé</span><h1>Vos services, à votre adresse.</h1><p>Reliez les machines de votre choix à votre propre domaine, sans ouvrir de port sur votre box.</p>
+  <div class="intro"><h1>Un passage privé entre chez toi et internet.</h1><p>Tes machines restent à la maison, la box reste fermée. Synunnel creuse le passage jusqu'à ton propre domaine.</p>
     <ul class="features">
-      <li><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#2451FF" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>Votre domaine, délégué par deux serveurs de noms</li>
-      <li><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#2451FF" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>HTTPS automatique pour chaque adresse</li>
-      <li><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#2451FF" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>Un tunnel WireGuard par machine, aucun port entrant</li>
-      <li><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#2451FF" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>Adresses publiques ou réservées à des comptes choisis</li>
+      <li>Ton domaine, délégué à deux serveurs de noms de l'instance</li>
+      <li>HTTPS automatique pour chaque adresse</li>
+      <li>Un tunnel WireGuard par machine, aucun port entrant</li>
+      <li>Des adresses publiques, ou réservées aux comptes que tu choisis</li>
     </ul>
     <p class="muted">{% if invitation_mode %}Accès sur invitation : l'administrateur te remet un code lié à ton adresse mail.{% else %}Les nouveaux comptes sont vérifiés par l'administrateur avant tout accès.{% endif %}</p></div>
-  <div class="card auth-card"><h2>Connexion</h2><p class="muted">Retrouvez vos domaines, machines et adresses.</p>
+  <div class="card auth-card"><h2>Connexion</h2><p class="muted">Retrouve tes domaines, machines et adresses.</p>
     <form method="post" action="{{ url_for('login') }}">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}"><input type="hidden" name="next" value="{{ next_url }}">
       <label>Adresse mail<input type="email" name="email" autocomplete="email" required></label>
@@ -23,4 +23,5 @@
     <p class="small">Pas encore de compte ? <a href="{{ url_for('register') }}">{% if invitation_mode %}J'ai un code d'invitation{% else %}Demander un accès{% endif %}</a></p>
   </div>
 </section>
+<img class="coupe" src="{{ url_for('static', filename='images/coupe-1536.jpg') }}" srcset="{{ url_for('static', filename='images/coupe-768.jpg') }} 768w, {{ url_for('static', filename='images/coupe-1536.jpg') }} 1536w" sizes="100vw" width="1536" height="854" alt="Coupe du sol en Haute-Provence : un tunnel part d'un mas, passe sous les couches de roche et remonte dans la cabane du serveur">
 {% endblock %}

@@ -1,5 +1,13 @@
 # Historique des versions
 
+## 0.3.0a1 - 1er octobre 2026
+
+Nouvelle apparence, sans aucun changement de fonctionnement ni de sécurité.
+
+- Charte « la coupe » : ciel pâle, couches de roche de Haute-Provence, accent ocre rouge. Police Archivo (SIL OFL 1.1, `synunnel/static/fonts/OFL.txt`) servie par l'instance : toujours aucune ressource externe.
+- Page de connexion : illustration en coupe d'un tunnel qui relie une maison au serveur, servie par l'instance en deux tailles.
+- Interface entièrement au tutoiement, libellés en casse normale.
+
 ## 0.2.0a1 - 29 septembre 2026
 
 Comptes plus sûrs, sur un design revu par une passe adversariale de Codex (NO-GO sur la première version, seize constats intégrés).

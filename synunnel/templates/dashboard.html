@@ -1,9 +1,9 @@
 {% extends "base.html" %}
 {% block title %}Tableau de bord{% endblock %}
 {% block content %}
-<section class="page-head"><span class="eyebrow">Tableau de bord</span><h1>Votre espace</h1><p>Préparez d'abord votre zone DNS, connectez une machine, puis publiez une adresse.</p></section>
+<section class="page-head"><span class="eyebrow">Tableau de bord</span><h1>Ton espace</h1><p>Prépare d'abord ta zone DNS, connecte une machine, puis publie une adresse.</p></section>
 <div class="step-grid">
-  <section class="card"><div class="step">Étape 1 · Domaine</div><h2>Ajouter un domaine</h2><p>Une preuve de propriété par enregistrement TXT, puis la copie de vos enregistrements publics avant toute délégation.</p>
+  <section class="card"><div class="step">Étape 1 · Domaine</div><h2>Ajouter un domaine</h2><p>Une preuve de propriété par enregistrement TXT, puis la copie de tes enregistrements publics avant toute délégation.</p>
     <form method="post" action="{{ url_for('add_domain') }}">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <label>Nom de domaine<input name="domain" placeholder="mondomaine.fr" required></label>
@@ -12,14 +12,14 @@
       <button class="button" type="submit">Continuer</button>
     </form>
   </section>
-  <section class="card"><div class="step">Étape 2 · Machine</div><h2>Connecter une machine</h2><p>La configuration WireGuard est montrée une seule fois. Conservez-la sur votre machine.</p>
+  <section class="card"><div class="step">Étape 2 · Machine</div><h2>Connecter une machine</h2><p>La configuration WireGuard est montrée une seule fois. Conserve-la sur ta machine.</p>
     <form method="post" action="{{ url_for('add_machine') }}">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <label>Nom de la machine<input name="name" placeholder="Salon" maxlength="80" required></label>
       <button class="button" type="submit">Créer une configuration</button>
     </form>
   </section>
-  <section class="card"><div class="step">Étape 3 · Adresse</div><h2>Publier un service</h2><p>L'adresse répondra sur votre domaine quand la délégation sera active.</p>
+  <section class="card"><div class="step">Étape 3 · Adresse</div><h2>Publier un service</h2><p>L'adresse répondra sur ton domaine quand la délégation sera active.</p>
     <form method="post" action="{{ url_for('add_address') }}">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <label>Domaine<select name="domain_id" required><option value="">Choisir</option>{% for domain in domains %}<option value="{{ domain.id }}">{{ domain.name }}</option>{% endfor %}</select></label>
