@@ -6,6 +6,12 @@ Synunnel publie des services hébergés chez vous (un NAS, une domotique, un pet
 
 *In English: Synunnel is a self-hosted alternative to tunnel services. A single VPS runs an authoritative DNS server (PowerDNS), an HTTPS reverse proxy with on-demand certificates (Caddy) and a WireGuard hub; users delegate their own domain to it and expose services from machines behind NAT. Code comments and docs are in French. MIT licensed, alpha quality.*
 
+## Où en est le projet
+
+Le développement de Synunnel a commencé le 27 septembre 2026, la version 0.2 alpha était prête trois jours plus tard, et elle tourne sur synunnel.fr depuis le 1er octobre. Le code a été écrit par Codex sur un cahier des charges de Syn, l'assistante IA de Synoptïa, puis relu avant d'être publié : un audit par douze experts IA, dont les sept défauts bloquants ont été corrigés, six passes de revue de Codex, 203 tests automatiques et un essai de bout en bout sur une installation neuve.
+
+Ce qui manque encore, ce sont des essais par d'autres personnes que son auteur : un seul domaine y est branché aujourd'hui, et les premiers essais avec des proches commencent. Si vous l'installez, traitez-le comme une alpha et dites-nous ce qui casse (les failles se signalent en privé, voir [SECURITY.md](SECURITY.md)).
+
 ## Comment ça marche
 
 ```
