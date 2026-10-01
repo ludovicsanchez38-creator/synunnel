@@ -1,5 +1,10 @@
 # Historique des versions
 
+## 0.3.1a1 - 1er octobre 2026
+
+- Logo « le puits » (le tunnel en U dans les couches de roche) dans l'en-tête de toutes les pages.
+- Favicon vectoriel et en PNG, icône d'écran d'accueil pour iPhone, servis par l'instance.
+
 ## 0.3.0a1 - 1er octobre 2026
 
 Nouvelle apparence, sans aucun changement de fonctionnement ni de sécurité.

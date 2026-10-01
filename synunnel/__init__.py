@@ -1,6 +1,6 @@
 """Application Synunnel."""
 
-__version__ = "0.3.0a1"
+__version__ = "0.3.1a1"
 VERSION_LABEL = "0.3 alpha"
 
 from .web import create_app
