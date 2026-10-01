@@ -80,9 +80,10 @@
 - Une session n'est jamais émise avec une version relue après le commit du changement qui l'autorise : une révocation concurrente la rend périmée.
 - Secrets (`SECRET_KEY`, `ADMIN_TOKEN`, `PDNS_API_KEY`, `TOTP_KEY`) dans `/etc/synunnel/synunnel.env`, root et groupe `synunnel`, mode 0640. La base et ses journaux sont en 0600 (masque 0077 des services, droits refixés au démarrage).
 
-## Limites connues de la v0.2 alpha
+## Limites connues de la v0.3 alpha
 
 - **Zone retirée dès la suppression du domaine.** Une fois la délégation retirée chez le registrar et le domaine supprimé, sa zone quitte aussitôt l'instance ; un résolveur qui a encore l'ancienne délégation en cache (jusqu'au TTL des NS de la zone parente, 48 heures pour `.com`) n'obtient plus de réponse jusqu'à l'expiration. Attendre ce délai après le changement chez le registrar avant de supprimer le domaine.
+- **Suppression de domaine sous charge (défaut `OWNER_DOMAIN_DELETION=1`).** Quand le titulaire peut supprimer son propre domaine, une suppression qui va être refusée parce que la délégation est encore active prend tout de même le verrou de zone avant de répondre. Si une projection de la même zone tourne en parallèle, le refus (HTTP 409) peut tarder, jusqu'à une quarantaine de secondes mesurées. Aucune perte de données, seulement une latence sous concurrence ; poser `OWNER_DOMAIN_DELETION=0` réserve la suppression à l'administrateur et écarte le cas.
 - **Archives syslog d'avant l'installation.** Si rsyslog tournait déjà, les archives `/var/log/syslog.*` écrites avant le filtre de Synunnel gardent les journaux de Caddy jusqu'à leur rotation (quatre semaines sur Ubuntu) ; les supprimer à la main si la durée de 30 jours annoncée doit valoir tout de suite.
 - **Un seul serveur DNS, pas de DNSSEC.** Si le VPS tombe, les domaines délégués cessent de répondre, messagerie comprise. Un enregistrement DS laissé chez le registrar casse la résolution.
 - **Copie DNS incomplète par nature.** Le DNS public ne liste ni tous les sous-domaines ni tous les sélecteurs DKIM. Le joker vers le VPS peut capter un nom oublié, par exemple l'hôte d'un MX. Comparer la zone à l'export du fournisseur actuel avant de déléguer.

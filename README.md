@@ -1,8 +1,10 @@
 # Synunnel
 
+![Un passage privé, creusé entre vos machines et internet](synunnel/static/images/coupe-1536.jpg)
+
 Synunnel publie des services hébergés chez vous (un NAS, une domotique, un petit site) sur votre propre nom de domaine, en HTTPS, sans ouvrir le moindre port sur votre box. Un VPS sert de porte d'entrée : il répond pour votre domaine, obtient les certificats et relaie le trafic vers vos machines par un tunnel WireGuard.
 
-> **Version 0.3 alpha.** Synunnel fonctionne de bout en bout et a été testé sur une installation neuve, mais il reste jeune. Réservez-le pour l'instant à des usages personnels ou à des proches de confiance, lisez les [limites connues](docs/SECURITE.md#limites-connues-de-la-v02-alpha) et gardez une sauvegarde de votre zone DNS actuelle avant toute délégation.
+> **Version 0.3 alpha.** Synunnel fonctionne de bout en bout et a été testé sur une installation neuve, mais il reste jeune. Réservez-le pour l'instant à des usages personnels ou à des proches de confiance, lisez les [limites connues](docs/SECURITE.md#limites-connues-de-la-v03-alpha) et gardez une sauvegarde de votre zone DNS actuelle avant toute délégation.
 
 *In English: Synunnel is a self-hosted alternative to tunnel services. A single VPS runs an authoritative DNS server (PowerDNS), an HTTPS reverse proxy with on-demand certificates (Caddy) and a WireGuard hub; users delegate their own domain to it and expose services from machines behind NAT. Code comments and docs are in French. MIT licensed, alpha quality.*
 
