@@ -33,7 +33,7 @@ from flask import (
 )
 
 from . import actions, security
-from .account import client_ip, mailer, no_store, record_event
+from .account import mailer, no_store, record_event
 from .db import get_db
 
 COOKIE = "__Host-synunnel-access"
@@ -204,7 +204,7 @@ def register(app: Flask) -> None:
     def guest_code():
         if request.method != "POST":
             return form_page(request.args.get("next", "")[:2000])
-        if not reserve("req_ip", client_ip(), *REQUESTS_PER_IP):
+        if not reserve("req_ip", actions.client_ip(), *REQUESTS_PER_IP):
             abort(429, "Trop de demandes. Réessaie plus tard.")
         next_url = request.form.get("next", "")[:2000]
         email = request.form.get("email", "").strip().lower()[:254]
@@ -250,7 +250,7 @@ def register(app: Flask) -> None:
     def guest_verify():
         if request.method != "POST":
             return no_store(render_template("guest_verify.html"))
-        if not reserve("verify_ip", client_ip(), *VERIFY_PER_IP):
+        if not reserve("verify_ip", actions.client_ip(), *VERIFY_PER_IP):
             abort(429, "Trop de tentatives. Réessaie plus tard.")
         value = session.get("guest_challenge", "")
         code = request.form.get("code", "").strip()

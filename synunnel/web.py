@@ -1,6 +1,5 @@
 """Interface et API de Synunnel."""
 
-import hashlib
 import hmac
 import os
 import secrets
@@ -41,17 +40,20 @@ SENSITIVE_PATHS = ("/login", "/logout", "/register", "/security", "/forgot", "/r
 DUMMY_HASH = PASSWORDS.hash(secrets.token_hex(16))
 PENDING = " La mise en service se termine automatiquement dans quelques minutes."
 REQUIRED_SETTINGS = ("PUBLIC_IPV4", "WG_ENDPOINT", "DASHBOARD_HOST", "NS1_HOST", "NS2_HOST")
+# Code à usage unique qui transmet la connexion du tableau de bord à une adresse protégée.
+ACCESS_CODE_TTL = 120
+# Une session d'adresse protégée dure autant, qu'elle soit ouverte par un compte ou par un invité.
+HOST_SESSION_TTL = guest.SESSION_TTL
 
 
-def _hash_token(value: str) -> str:
-    return hashlib.sha256(value.encode("utf-8")).hexdigest()
-
-
-def _client_ip() -> str:
-    raw = request.remote_addr
-    if raw in {"127.0.0.1", "::1"}:
-        raw = request.headers.get("X-Real-IP", raw)
-    return actions.client_bucket(raw)
+def _open_host_session(next_path: str, token: str):
+    """Redirige vers l'adresse protégée en y posant le cookie d'accès, que la session soit celle
+    d'un compte ou d'un invité."""
+    response = redirect(next_path)
+    response.set_cookie(ACCESS_COOKIE, token, secure=True, httponly=True, samesite="Lax",
+                        max_age=HOST_SESSION_TTL, path="/")
+    response.headers["Cache-Control"] = "no-store"
+    return response
 
 
 def _same_secret(expected: str, supplied: str) -> bool:
@@ -122,7 +124,7 @@ def _redirect_after_login(next_url: str, user_id: int):
     db.execute(
         "INSERT INTO access_codes(code_hash,user_id,hostname,next_path,expires_at,session_version) "
         "VALUES(?,?,?,?,?,?)",
-        (_hash_token(code), user_id, hostname, path, int(time.time()) + 120, session.get("sv", -1)),
+        (security.digest(code), user_id, hostname, path, int(time.time()) + ACCESS_CODE_TTL, session.get("sv", -1)),
     )
     db.commit()
     target = f"https://{hostname}/__synunnel/auth/callback?code={quote(code)}"
@@ -294,7 +296,7 @@ def create_app(config_override: dict | None = None) -> Flask:
                 db = get_db()
                 db.execute(
                     "INSERT INTO admin_audit(at,ip,method,path,status,target_user_id) VALUES(?,?,?,?,?,?)",
-                    (now_iso(), _client_ip(), request.method, request.path[:200], response.status_code, target),
+                    (now_iso(), actions.client_ip(), request.method, request.path[:200], response.status_code, target),
                 )
                 db.commit()
             response.headers["Cache-Control"] = "no-store"
@@ -318,7 +320,7 @@ def create_app(config_override: dict | None = None) -> Flask:
         invitation_mode = app.config["REGISTRATION_MODE"] != "approval"
         if request.method != "POST":
             return render_template("register.html", invitation_mode=invitation_mode)
-        _rate_limit("register", _client_ip(), 5, 3600)
+        _rate_limit("register", actions.client_ip(), 5, 3600)
         email = request.form.get("email", "").strip().lower()
         password = request.form.get("password", "")
         if not EMAIL_RE.fullmatch(email) or len(email) > 254 or len(password) < 12:
@@ -338,7 +340,7 @@ def create_app(config_override: dict | None = None) -> Flask:
             if invitation_mode and code:
                 invitation = db.execute(
                     "SELECT code_hash FROM invitations WHERE code_hash=? AND email=? AND used_at IS NULL AND expires_at>?",
-                    (_hash_token(code), email, int(time.time())),
+                    (security.digest(code), email, int(time.time())),
                 ).fetchone()
             if not blocked and not exists and (invitation or not invitation_mode):
                 db.execute(
@@ -363,7 +365,7 @@ def create_app(config_override: dict | None = None) -> Flask:
                 return _redirect_after_login(next_url, g.user["id"])
             return render_template("login.html", next_url=next_url, guest_codes=guest.offers_codes(next_url))
         email = request.form.get("email", "").strip().lower()[:254]
-        ip = _client_ip()
+        ip = actions.client_ip()
         # Seuls les échecs comptent, par adresse et par couple adresse-compte : un tiers qui se trompe
         # de mot de passe depuis ailleurs ne peut pas empêcher le titulaire de se connecter.
         # Chaque essai est réservé atomiquement avant la vérification, puis rendu s'il réussit.
@@ -657,7 +659,7 @@ def create_app(config_override: dict | None = None) -> Flask:
             token_id = db.execute(
                 "INSERT INTO api_tokens(user_id,name,token_hash,prefix,scopes,created_at,expires_at,"
                 "credential_version) VALUES(?,?,?,?,?,?,?,?)",
-                (g.user["id"], name, api.hash_token(value), value[:10], ",".join(sorted(set(chosen))), now_iso(),
+                (g.user["id"], name, security.digest(value), value[:10], ",".join(sorted(set(chosen))), now_iso(),
                  now + days * 86400, row["credential_version"]),
             ).lastrowid
             db.execute("INSERT INTO api_audit(at,user_id,token_id,action,resource) VALUES(?,?,?,?,?)",
@@ -719,11 +721,11 @@ def create_app(config_override: dict | None = None) -> Flask:
             header = request.headers.get("Authorization", "")
             supplied = header[7:] if header.startswith("Bearer ") else ""
             # Plafond vérifié avant la comparaison : au-delà, même le bon jeton attend.
-            if actions.limit_reached("admin_auth", _client_ip(), 20, 600):
+            if actions.limit_reached("admin_auth", actions.client_ip(), 20, 600):
                 return jsonify({"error": "trop de tentatives"}), 429
             if not _same_secret(app.config["ADMIN_TOKEN"], supplied):
                 # Refus comptés sans rien écrire dans le journal : un anonyme ne remplit pas la base.
-                actions.record_attempt("admin_auth", _client_ip())
+                actions.record_attempt("admin_auth", actions.client_ip())
                 return jsonify({"error": "non autorisé"}), 401
             g.admin_ok = True
             return fn(*args, **kwargs)
@@ -800,7 +802,7 @@ def create_app(config_override: dict | None = None) -> Flask:
         with get_db() as db:
             db.execute("DELETE FROM invitations WHERE email=? AND used_at IS NULL", (email,))
             db.execute("INSERT INTO invitations(code_hash,email,created_at,expires_at) VALUES(?,?,?,?)",
-                       (_hash_token(code), email, now_iso(), expires))
+                       (security.digest(code), email, now_iso(), expires))
         return jsonify({"email": email, "code": code, "expires_at": expires})
 
     @app.post("/admin/api/users/<int:user_id>/recovery")
@@ -892,7 +894,7 @@ def create_app(config_override: dict | None = None) -> Flask:
                 "SELECT s.user_id FROM host_sessions s JOIN users u ON u.id=s.user_id "
                 f"AND u.session_version=s.session_version AND {policy} "
                 "WHERE s.token_hash=? AND s.hostname=? AND s.expires_at>?",
-                (*params, _hash_token(token), hostname, int(time.time())),
+                (*params, security.digest(token), hostname, int(time.time())),
             ).fetchone()
             if found and _authorized_protected_user(hostname, found["user_id"]):
                 return "", 204
@@ -919,34 +921,27 @@ def create_app(config_override: dict | None = None) -> Flask:
             "SELECT c.user_id,c.hostname,c.next_path,c.session_version FROM access_codes c "
             "JOIN users u ON u.id=c.user_id AND u.status='approved' AND u.session_version=c.session_version "
             f"AND {policy} WHERE c.code_hash=? AND c.hostname=? AND c.expires_at>?",
-            (*params, _hash_token(code), hostname, int(time.time())),
+            (*params, security.digest(code), hostname, int(time.time())),
         ).fetchone()
         if row is None:
             exchanged = guest.exchange_transfer_code(db, code, hostname)
             if exchanged is None:
                 abort(403)
             token, next_path = exchanged
-            response = redirect(next_path)
-            response.set_cookie(ACCESS_COOKIE, token, secure=True, httponly=True, samesite="Lax", max_age=43200,
-                                path="/")
-            response.headers["Cache-Control"] = "no-store"
-            return response
+            return _open_host_session(next_path, token)
         if not _authorized_protected_user(hostname, row["user_id"]):
             abort(403)
         token = secrets.token_urlsafe(32)
         with db:
-            deleted = db.execute("DELETE FROM access_codes WHERE code_hash=?", (_hash_token(code),))
+            deleted = db.execute("DELETE FROM access_codes WHERE code_hash=?", (security.digest(code),))
             if deleted.rowcount != 1:
                 abort(403)
             db.execute(
                 "INSERT INTO host_sessions(token_hash,user_id,hostname,expires_at,session_version) "
                 "VALUES(?,?,?,?,?)",
-                (_hash_token(token), row["user_id"], hostname, int(time.time()) + 43200, row["session_version"]),
+                (security.digest(token), row["user_id"], hostname, int(time.time()) + HOST_SESSION_TTL, row["session_version"]),
             )
-        response = redirect(row["next_path"])
-        response.set_cookie(ACCESS_COOKIE, token, secure=True, httponly=True, samesite="Lax", max_age=43200, path="/")
-        response.headers["Cache-Control"] = "no-store"
-        return response
+        return _open_host_session(row["next_path"], token)
 
     account.register(app, _redirect_after_login)
     guest.register(app)

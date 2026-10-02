@@ -25,7 +25,7 @@ from collections.abc import Callable
 from contextlib import contextmanager, nullcontext
 
 import requests
-from flask import Flask, current_app
+from flask import Flask, current_app, request
 
 from .db import allocate_id, get_db, now_iso
 from .dns import (
@@ -81,6 +81,14 @@ def client_bucket(raw: str | None) -> str:
             return str(ip.ipv4_mapped)
         return str(ipaddress.ip_network(f"{ip}/64", strict=False))
     return str(ip)
+
+
+def client_ip() -> str:
+    """Clé de limitation de la requête en cours. Derrière le proxy local, l'adresse vient de X-Real-IP."""
+    raw = request.remote_addr
+    if raw in {"127.0.0.1", "::1"}:
+        raw = request.headers.get("X-Real-IP", raw)
+    return client_bucket(raw)
 
 
 def limit_reached(kind: str, key: str, limit: int, window: int) -> bool:
@@ -148,10 +156,13 @@ def clean_label(value, maximum: int, what: str) -> str:
     return text
 
 
+def _nameservers(app: Flask) -> tuple[str, str]:
+    """Serveurs de noms de l'instance, sous forme absolue (point final)."""
+    return f"{app.config['NS1_HOST']}.", f"{app.config['NS2_HOST']}."
+
+
 def _pdns(app: Flask) -> PowerDNS:
-    return PowerDNS(app.config["PDNS_API_URL"], app.config["PDNS_API_KEY"], (
-        f"{app.config['NS1_HOST']}.", f"{app.config['NS2_HOST']}.",
-    ))
+    return PowerDNS(app.config["PDNS_API_URL"], app.config["PDNS_API_KEY"], _nameservers(app))
 
 
 def sync_zone(app: Flask, db, domain) -> None:
@@ -220,6 +231,14 @@ def project_runtime(app: Flask) -> bool:
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
         return False
     return True
+
+
+def _project_both(app: Flask, domain) -> bool:
+    """Projette la zone puis WireGuard et Caddy. Les deux tournent toujours, même quand la première
+    échoue : un `and` qui court-circuite laisserait le runtime en retard sur la base."""
+    zone = project_zone(app, domain)
+    runtime = project_runtime(app)
+    return zone and runtime
 
 
 def _begin(db, guard: Guard) -> None:
@@ -324,7 +343,7 @@ def domain_view(app: Flask, user_id: int, domain_id: int) -> dict:
     records = get_db().execute(
         "SELECT * FROM records WHERE domain_id=? ORDER BY name,type,content", (domain_id,),
     ).fetchall()
-    nameservers = (f"{app.config['NS1_HOST']}.", f"{app.config['NS2_HOST']}.")
+    nameservers = _nameservers(app)
     # État de délégation relevé par le rapprochement automatique : afficher une page ne déclenche
     # jamais de requête DNS sortante.
     active = None if domain["delegation_active"] is None else bool(domain["delegation_active"])
@@ -336,7 +355,7 @@ def domain_view(app: Flask, user_id: int, domain_id: int) -> dict:
 def refresh_delegation(app: Flask, domain) -> tuple[bool | None, list[str]]:
     """Relève la délégation, l'inscrit pour l'affichage et la renvoie. Un relevé commencé avant celui déjà
     en base ne l'écrase pas : deux relevés concurrents laissent toujours le plus récent."""
-    nameservers = (f"{app.config['NS1_HOST']}.", f"{app.config['NS2_HOST']}.")
+    nameservers = _nameservers(app)
     started = int(time.time())
     active, parent_ns = delegation_status(domain["name"], nameservers)
     with get_db() as db:
@@ -608,8 +627,7 @@ def delete_domain(app: Flask, user_id: int | None, domain_id: int, guard: Guard 
                    get_db().execute("SELECT * FROM domains WHERE id=?", (domain_id,)).fetchone())
         if current is not None:
             active, seen = refresh_delegation(app, current)
-            designated = still_designated(active, seen, (f"{app.config['NS1_HOST']}.",
-                                                         f"{app.config['NS2_HOST']}."))
+            designated = still_designated(active, seen, _nameservers(app))
     db = get_db()
     name = db.execute("SELECT name FROM domains WHERE id=?", (domain_id,)).fetchone()
     with name_lock(app, name["name"]) if name else nullcontext(), db:
@@ -793,10 +811,10 @@ def create_address(app: Flask, user_id: int, domain_id, machine_id, name_raw, po
                 audit(db, "address.create", f"address:{address_id} {hostname} port={port} "
                                         f"{'protégée' if protected else 'publique'}")
     except _Replay as replay:
-        return {**replay.result, "synced": project_zone(app, domain) & project_runtime(app)}
+        return {**replay.result, "synced": _project_both(app, domain)}
     except sqlite3.IntegrityError as exc:
         raise ActionError(409, "conflict", "Cette adresse existe déjà.") from exc
-    synced = project_zone(app, domain) & project_runtime(app)
+    synced = _project_both(app, domain)
     return {"id": address_id, "hostname": hostname, "created": True, "synced": synced}
 
 
@@ -812,7 +830,7 @@ def delete_address(app: Flask, user_id: int, address_id: int, guard: Guard = Non
         if audit:
             audit(db, "address.delete", f"address:{address_id} {row['hostname']}")
     domain = {"id": row["domain_id"], "name": row["domain_name"]}
-    return {"synced": project_zone(app, domain) & project_runtime(app)}
+    return {"synced": _project_both(app, domain)}
 
 
 def protected_address(user_id: int, address_id: int):

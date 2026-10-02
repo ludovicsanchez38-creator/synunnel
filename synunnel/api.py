@@ -7,7 +7,6 @@ générée sur la machine et ne transite jamais par l'API. Les jetons se créent
 uniquement depuis le tableau de bord. Le cookie de session n'est jamais lu ici.
 """
 
-import hashlib
 import re
 import secrets
 import threading
@@ -18,7 +17,7 @@ from functools import wraps
 from flask import Blueprint, Flask, current_app, g, jsonify, request
 from werkzeug.exceptions import HTTPException
 
-from . import actions
+from . import actions, security
 from .db import get_db, now_iso
 
 TOKEN_PREFIX = "syn_"
@@ -33,10 +32,6 @@ TOKEN_DURATIONS = (7, 30)
 MAX_ACTIVE_TOKENS = 5
 
 bp = Blueprint("api", __name__, url_prefix="/api/v1")
-
-
-def hash_token(value: str) -> str:
-    return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
 def new_token() -> str:
@@ -59,13 +54,6 @@ def _error(status: int, code: str, message: str, headers: dict | None = None):
 
 def _unauthorized(message: str) -> ApiError:
     return ApiError(401, "unauthorized", message, {"WWW-Authenticate": 'Bearer realm="synunnel"'})
-
-
-def _client_ip() -> str:
-    raw = request.remote_addr
-    if raw in {"127.0.0.1", "::1"}:
-        raw = request.headers.get("X-Real-IP", raw)
-    return actions.client_bucket(raw)
 
 
 def _limit(kind: str, key: str, limit: int, window: int) -> None:
@@ -93,7 +81,7 @@ def _limit_reads(user_id: int, limit: int = 300, window: int = 60) -> None:
 
 def _refuse_anonymous() -> None:
     """Un échec d'authentification compte pour l'adresse (/64 en IPv6) et pour toute l'instance."""
-    ip = _client_ip()
+    ip = actions.client_ip()
     if actions.limit_reached("api_auth", ip, 20, 600) or actions.limit_reached("api_auth_all", "*", 2000, 600):
         raise ApiError(429, "rate_limited", "Trop d'échecs d'authentification.", {"Retry-After": "600"})
     actions.record_attempt("api_auth", ip)
@@ -128,7 +116,7 @@ def _authenticate():
         raise _unauthorized("Jeton d'API manquant ou mal formé.")
     db = get_db()
     row = db.execute(TOKEN_SQL + "WHERE t.token_hash=? AND t.revoked_at IS NULL AND t.expires_at>?",
-                     (hash_token(value), int(time.time()))).fetchone()
+                     (security.digest(value), int(time.time()))).fetchone()
     if row is None:
         _refuse_anonymous()
         raise _unauthorized("Jeton d'API invalide, expiré ou révoqué.")
@@ -156,7 +144,7 @@ def _guard(db) -> None:
 def _audit(db, action: str, resource: str) -> None:
     db.execute(
         "INSERT INTO api_audit(at,user_id,token_id,action,resource,ip) VALUES(?,?,?,?,?,?)",
-        (now_iso(), g.api_token["user_id"], g.api_token["id"], action, resource[:300], _client_ip()),
+        (now_iso(), g.api_token["user_id"], g.api_token["id"], action, resource[:300], actions.client_ip()),
     )
 
 

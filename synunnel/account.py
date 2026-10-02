@@ -66,13 +66,6 @@ def _now() -> float:
     return time.time()
 
 
-def client_ip() -> str:
-    raw = request.remote_addr
-    if raw in {"127.0.0.1", "::1"}:
-        raw = request.headers.get("X-Real-IP", raw)
-    return actions.client_bucket(raw)
-
-
 def require_2fa(app: Flask | None = None) -> bool:
     return bool((app or current_app).config.get("REQUIRE_2FA"))
 
@@ -110,7 +103,7 @@ def reserve_mfa(user_id: int) -> tuple[int, int]:
     verrou d'écriture de la requête. Un échec garde sa réservation (il compte) ; un succès, ou une
     sortie sans vérification, la rend par `actions.release_attempts`."""
     user_slot = actions.reserve_attempt("mfa_user", str(user_id), *MFA_USER_LIMIT)
-    ip_slot = actions.reserve_attempt("mfa_ip", client_ip(), *MFA_IP_LIMIT) if user_slot else None
+    ip_slot = actions.reserve_attempt("mfa_ip", actions.client_ip(), *MFA_IP_LIMIT) if user_slot else None
     if not user_slot or not ip_slot:
         actions.release_attempts(user_slot, ip_slot)
         abort(429, "Trop de tentatives. Réessaie plus tard.")
@@ -170,7 +163,7 @@ def invalidate_credentials(db, user_id: int, revoke_tokens: bool = True) -> None
 
 def record_event(db, user_id: int | None, event: str, via: str = "", actor: str = "user") -> None:
     db.execute("INSERT INTO security_events(at,user_id,actor,event,via,ip) VALUES(?,?,?,?,?,?)",
-                (now_iso(), user_id, actor, event, via, client_ip() if request else ""))
+                (now_iso(), user_id, actor, event, via, actions.client_ip() if request else ""))
 
 
 def notify(user_id: int, event: str) -> None:
@@ -497,7 +490,7 @@ def register(app: Flask, redirect_after_login) -> None:
     def email_verify_confirm():
         if request.method != "POST":
             return no_store(render_template("email_confirm.html", token=request.args.get("token", "")[:200]))
-        slot = reserve_or_429("verify_ip", client_ip(), 10, 900)
+        slot = reserve_or_429("verify_ip", actions.client_ip(), 10, 900)
         value = request.form.get("token", "")
         now = int(_now())
         db = get_db()
@@ -525,7 +518,7 @@ def register(app: Flask, redirect_after_login) -> None:
     def forgot():
         if request.method != "POST":
             return no_store(render_template("forgot.html", mail_enabled=mailer().enabled))
-        reserve_or_429("forgot_ip", client_ip(), 5, 3600)
+        reserve_or_429("forgot_ip", actions.client_ip(), 5, 3600)
         email = request.form.get("email", "").strip().lower()[:254]
         # Mêmes étapes et même réponse, qu'un compte existe ou non ; l'envoi part dans une file.
         if actions.EMAIL_RE.fullmatch(email):
@@ -568,7 +561,7 @@ def register(app: Flask, redirect_after_login) -> None:
     def reset_password():
         if request.method != "POST":
             return no_store(render_template("reset.html", token=request.args.get("token", "")[:200]))
-        slot = reserve_or_429("reset_ip", client_ip(), 10, 900)
+        slot = reserve_or_429("reset_ip", actions.client_ip(), 10, 900)
         value = request.form.get("token", "")
         email = request.form.get("email", "").strip().lower()[:254]
         password = request.form.get("password", "")
@@ -580,7 +573,7 @@ def register(app: Flask, redirect_after_login) -> None:
     def recover():
         if request.method != "POST":
             return no_store(render_template("recover.html", token=""))
-        slot = reserve_or_429("recover_ip", client_ip(), 10, 900)
+        slot = reserve_or_429("recover_ip", actions.client_ip(), 10, 900)
         return consume_ticket("admin", request.form.get("ticket", "").strip(),
                               request.form.get("email", "").strip().lower()[:254], slot,
                               new_password=request.form.get("new_password", ""),
