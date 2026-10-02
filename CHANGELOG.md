@@ -1,5 +1,13 @@
 # Historique des versions
 
+## 0.3.3a1 - 2 octobre 2026
+
+Deux durcissements mineurs issus du test d'intrusion du 1er octobre.
+
+- Caddy retire l'en-tête `Server: gunicorn` des réponses de l'application (tableau de bord, chemins réservés et contrôle d'accès des adresses). Le service d'une machine garde le sien.
+- HSTS avec `includeSubDomains` sur l'adresse du tableau de bord seulement, jamais sur les adresses des utilisateurs.
+- Le troisième point du test (requêtes DNS ANY) ne demandait rien : en UDP, PowerDNS répond déjà par un paquet tronqué qui renvoie vers TCP.
+
 ## 0.3.2a1 - 2 octobre 2026
 
 Ménage de code, sans aucun changement de fonctionnement ni de sécurité (203 tests inchangés).

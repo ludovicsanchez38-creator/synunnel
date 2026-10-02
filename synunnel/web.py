@@ -286,7 +286,12 @@ def create_app(config_override: dict | None = None) -> Flask:
             "frame-ancestors 'none'; base-uri 'none'"
         )
         if request.is_secure:
-            response.headers["Strict-Transport-Security"] = "max-age=31536000"
+            # includeSubDomains sur le seul tableau de bord : sur l'adresse d'un utilisateur, l'en-tête
+            # s'imposerait aux sous-domaines de son domaine, qui ne sont pas les nôtres.
+            hsts = "max-age=31536000"
+            if request.host.split(":", 1)[0].lower() == app.config["DASHBOARD_HOST"]:
+                hsts += "; includeSubDomains"
+            response.headers["Strict-Transport-Security"] = hsts
         if request.path.startswith(("/api/", *SENSITIVE_PATHS)):
             # Authentification, récupération, sécurité, accès invité : jamais en cache, erreurs comprises.
             response.headers["Cache-Control"] = "no-store"

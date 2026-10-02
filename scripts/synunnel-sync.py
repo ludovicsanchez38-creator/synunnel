@@ -113,7 +113,10 @@ def caddy_routes(db: sqlite3.Connection) -> str:
             # Chemins réservés de Synunnel sur l'adresse (callback d'accès, sortie d'un invité).
             f"    @synunnel_callback_{n} path /__synunnel/*",
             f"    handle @synunnel_callback_{n} {{",
-            "        reverse_proxy 127.0.0.1:8000",
+            # L'en-tête Server de gunicorn est retiré, comme sur le tableau de bord.
+            "        reverse_proxy 127.0.0.1:8000 {",
+            "            header_down -Server",
+            "        }",
             "    }",
             # Un jeton d'API Synunnel envoyé par erreur à cette adresse ne doit jamais
             # atteindre le service qui s'y trouve.
@@ -129,6 +132,7 @@ def caddy_routes(db: sqlite3.Connection) -> str:
             "    handle {",
             "        forward_auth 127.0.0.1:8000 {",
             f"            uri /internal/caddy/auth?route={token}",
+            "            header_down -Server",
             "        }",
             f"        reverse_proxy {parsed_ip}:{port} {{",
             # Le cookie d'accès Synunnel ne quitte jamais Caddy : le service de la machine ne le voit pas.

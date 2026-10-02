@@ -42,6 +42,8 @@ https:// {
         handle {
             reverse_proxy 127.0.0.1:8000 {
                 header_up X-Real-IP {remote_host}
+                # Caddy garde son propre en-tête Server ; celui de gunicorn n'apprendrait rien d'utile au visiteur.
+                header_down -Server
             }
         }
     }
