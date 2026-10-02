@@ -606,7 +606,7 @@ wheels = [
 
 [[package]]
 name = "synunnel"
-version = "0.3.1a1"
+version = "0.3.2a1"
 source = { editable = "." }
 dependencies = [
     { name = "argon2-cffi" },

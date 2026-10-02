@@ -1,5 +1,14 @@
 # Historique des versions
 
+## 0.3.2a1 - 2 octobre 2026
+
+Ménage de code, sans aucun changement de fonctionnement ni de sécurité (203 tests inchangés).
+
+- Une seule empreinte SHA-256 (`security.digest`) et un seul calcul de l'adresse du client (`actions.client_ip`), au lieu de trois copies chacun.
+- Les deux mises à jour qui suivent un changement d'adresse (zone DNS, puis WireGuard et Caddy) passent par une fonction qui dit pourquoi elles tournent toujours toutes les deux.
+- Durées nommées pour le code de passage vers une adresse protégée et pour la session d'adresse ; le cookie d'accès est posé à un seul endroit.
+- Les serveurs de noms de l'instance sont construits à un seul endroit.
+
 ## 0.3.1a1 - 1er octobre 2026
 
 - Logo « le puits » (le tunnel en U dans les couches de roche) dans l'en-tête de toutes les pages.
