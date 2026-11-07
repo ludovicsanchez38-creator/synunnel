@@ -54,6 +54,15 @@ CREATE TABLE IF NOT EXISTS machines (
     created_at TEXT NOT NULL,
     UNIQUE(user_id, name)
 );
+CREATE TABLE IF NOT EXISTS wireguard_removals (
+    ip TEXT PRIMARY KEY,
+    generation TEXT NOT NULL DEFAULT (lower(hex(randomblob(16))))
+);
+CREATE TRIGGER IF NOT EXISTS quarantine_deleted_machine
+AFTER DELETE ON machines
+BEGIN
+    INSERT OR REPLACE INTO wireguard_removals(ip) VALUES(OLD.ip);
+END;
 CREATE TABLE IF NOT EXISTS addresses (
     id INTEGER PRIMARY KEY,
     domain_id INTEGER NOT NULL REFERENCES domains(id) ON DELETE CASCADE,

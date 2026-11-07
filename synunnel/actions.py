@@ -695,7 +695,8 @@ def _insert_machine(app: Flask, user_id: int, name_raw, public_key: str, guard: 
             owned = db.execute("SELECT COUNT(*) FROM machines WHERE user_id=?", (user_id,)).fetchone()[0]
             if owned >= app.config["MAX_MACHINES_PER_USER"]:
                 raise ActionError(409, "quota", "Nombre maximal de machines atteint pour ce compte.")
-            used = {row[0] for row in db.execute("SELECT ip FROM machines")}
+            # Une suppression en base ne prouve pas que l'ancien pair a quitté WireGuard.
+            used = {row[0] for row in db.execute("SELECT ip FROM machines UNION SELECT ip FROM wireguard_removals")}
             ip = next((f"10.88.0.{n}" for n in range(2, 255) if f"10.88.0.{n}" not in used), None)
             if ip is None:
                 raise ActionError(409, "exhausted", "Plage d'adresses WireGuard épuisée.")

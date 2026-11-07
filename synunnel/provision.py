@@ -87,8 +87,9 @@ def provision_site(
         if machine is None:
             if machine_public_key is None:
                 raise ValueError("Machine absente : fournir sa clé publique ou la créer d'abord.")
-            if db.execute("SELECT 1 FROM machines WHERE ip=? OR public_key=?",
-                          (str(ip), machine_public_key)).fetchone():
+            if db.execute("SELECT 1 FROM machines WHERE ip=? OR public_key=? "
+                          "UNION ALL SELECT 1 FROM wireguard_removals WHERE ip=?",
+                          (str(ip), machine_public_key, str(ip))).fetchone():
                 raise ValueError("IP ou clé WireGuard déjà utilisée.")
             machine_id = db.execute(
                 "INSERT INTO machines(id,user_id,name,ip,public_key,created_at) VALUES(?,?,?,?,?,?)",
@@ -153,8 +154,9 @@ def create_machine_config(
     user = db.execute("SELECT id FROM users WHERE email=? AND status='approved'", (user_email.lower(),)).fetchone()
     if user is None:
         raise ValueError("Compte approuvé introuvable.")
-    if db.execute("SELECT 1 FROM machines WHERE ip=? OR (user_id=? AND name=?)",
-                  (str(ip), user["id"], machine_name)).fetchone():
+    if db.execute("SELECT 1 FROM machines WHERE ip=? OR (user_id=? AND name=?) "
+                  "UNION ALL SELECT 1 FROM wireguard_removals WHERE ip=?",
+                  (str(ip), user["id"], machine_name, str(ip))).fetchone():
         raise ValueError("Machine ou IP déjà utilisée.")
     if keypair is None:
         private, public = generate_keypair()
@@ -164,8 +166,9 @@ def create_machine_config(
         raise ValueError("Clé WireGuard invalide.")
     with db:
         db.execute("BEGIN IMMEDIATE")
-        if db.execute("SELECT 1 FROM machines WHERE ip=? OR public_key=? OR (user_id=? AND name=?)",
-                      (str(ip), public, user["id"], machine_name)).fetchone():
+        if db.execute("SELECT 1 FROM machines WHERE ip=? OR public_key=? OR (user_id=? AND name=?) "
+                      "UNION ALL SELECT 1 FROM wireguard_removals WHERE ip=?",
+                      (str(ip), public, user["id"], machine_name, str(ip))).fetchone():
             raise ValueError("Machine, IP ou clé déjà utilisée.")
         db.execute(
             "INSERT INTO machines(id,user_id,name,ip,public_key,created_at) VALUES(?,?,?,?,?,?)",

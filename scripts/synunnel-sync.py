@@ -153,13 +153,14 @@ def wireguard_active() -> bool:
     ).returncode == 0
 
 
-def read_snapshot() -> tuple[str, str]:
+def read_snapshot() -> tuple[str, str, list[tuple[str, str]]]:
     """Lit pairs et routes dans une seule transaction : les deux reflètent le même état."""
     db = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True, isolation_level=None)
     db.row_factory = sqlite3.Row
     try:
         db.execute("BEGIN")
-        return wireguard_config(db), caddy_routes(db)
+        removals = [tuple(row) for row in db.execute("SELECT ip,generation FROM wireguard_removals")]
+        return wireguard_config(db), caddy_routes(db), removals
     finally:
         db.close()
 
@@ -170,16 +171,31 @@ def main() -> None:
     # Deux workers peuvent déclencher une synchronisation au même moment : on les sérialise.
     with open(LOCK_PATH, "w") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
-        apply(*read_snapshot())
+        new_wg, new_routes, removals = read_snapshot()
+        apply(new_wg, new_routes)
+        # Seuls les retraits du même instantané sont acquittés : une machine supprimée
+        # pendant l'application peut encore figurer dans les pairs que l'on vient de charger.
+        if removals:
+            db = sqlite3.connect(DB_PATH, timeout=10)
+            try:
+                with db:
+                    db.executemany("DELETE FROM wireguard_removals WHERE ip=? AND generation=?", removals)
+            finally:
+                db.close()
 
 
 def apply(new_wg: str, new_routes: str) -> None:
-    """WireGuard puis Caddy, chacun de son côté : l'échec de l'un n'empêche pas l'autre d'être appliqué."""
+    """N'active des routes qu'après WireGuard ; les retraits de pairs précèdent toujours Caddy."""
     failures = []
     for step in (apply_wireguard, apply_caddy):
+        if step is apply_caddy and failures:
+            # Un fichier de commentaires ne fait que retirer toutes les routes : ce retrait
+            # reste possible en panne WireGuard. Toute activation attend une application réussie.
+            if any(line.strip() and not line.lstrip().startswith("#") for line in new_routes.splitlines()):
+                break
         try:
             step(new_wg, new_routes)
-        except Exception as exc:  # noqa: BLE001 - on tente les deux, on échoue ensuite
+        except Exception as exc:  # noqa: BLE001 - échec signalé au rapprochement automatique
             failures.append(f"{step.__name__} : {exc}")
     if failures:
         raise SystemExit("Synchronisation incomplète : " + " ; ".join(failures))
